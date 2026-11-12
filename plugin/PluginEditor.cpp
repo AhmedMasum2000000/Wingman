@@ -350,7 +350,7 @@ void ChordStrip::paint (juce::Graphics& g)
 
         g.setColour (ink);
         g.setFont (display (juce::jlimit (11.0f, 46.0f, juce::jmin (width * 0.40f, height * 0.55f))));
-        g.drawFittedText (chordName (chord), inner.toNearestInt(), juce::Justification::centred, 1, 0.6f);
+        g.drawFittedText (chordName (chord, key), inner.toNearestInt(), juce::Justification::centred, 1, 0.6f);
     }
 }
 
@@ -366,7 +366,7 @@ void ChordStrip::mouseDown (const juce::MouseEvent& e)
     menu.setLookAndFeel (&getLookAndFeel());
     menu.addSectionHeader ("Chords that fit here, best first");
     for (size_t i = 0; i < alternatives.size(); ++i)
-        menu.addItem ((int) i + 1, juce::String (chordName (alternatives[i])) + "    " + romanNumeral (alternatives[i], key),
+        menu.addItem ((int) i + 1, juce::String (chordName (alternatives[i], key)) + "    " + romanNumeral (alternatives[i], key),
                       true, alternatives[i] == progression[(size_t) segment]);
 
     const auto target = localAreaToGlobal (cellBounds (segment, (int) progression.size()).toNearestInt());
@@ -477,7 +477,7 @@ BacklineEditor::BacklineEditor (BacklineProcessor& p)
     recordButton.setTooltip ("Record audio from this track");
     recordButton.onClick = [this] { processor.setRecordArmed (! processor.isRecordArmed()); refresh(); };
 
-    for (int i = 0; i < 12; ++i) tonicBox.addItem (pitchClassName (i), i + 1);
+    for (int i = 0; i < 12; ++i) tonicBox.addItem (pitchClassName (i), i + 1); // relabelled per mode in refresh()
     modeBox.addItemList ({ "major", "minor" }, 1);
     auto keyChanged = [this] { processor.setKey ({ tonicBox.getSelectedId() - 1, modeBox.getSelectedId() == 2, 1.0f }); };
     tonicBox.onChange = keyChanged;

@@ -137,7 +137,7 @@ void BacklineProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, 
 void BacklineProcessor::scheduleNotes (const std::vector<Note>& notes, juce::MidiBuffer& midi, double blockStart,
                                        double blockEnd, double loopBeats, int numSamples)
 {
-    if (blockStart == blockEnd || loopBeats <= 0.0 || numSamples <= 0)
+    if (std::abs (blockEnd - blockStart) < 1.0e-12 || loopBeats <= 0.0 || numSamples <= 0)
         return;
     const double span = positiveMod (blockEnd - blockStart, loopBeats);
     auto offsetFor = [&] (double beat, int& offset)
@@ -170,7 +170,7 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 
     // Transport: the host's when it provides musical time, otherwise a free-running clock.
     // (The standalone app and some simple hosts supply a playhead with no tempo or position.)
-    double hostBpm = 120.0, ppq = internalPpq, beatsPerBar = 4.0, barStart = 0.0;
+    double hostBpm = 120.0, ppq = internalPpq, hostBeatsPerBar = 4.0, barStart = 0.0;
     bool playing = true, hasBarStart = false, hostTransport = false;
     if (auto* hostPlayHead = getPlayHead())
         if (auto position = hostPlayHead->getPosition())
@@ -181,7 +181,7 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 if (auto b = position->getBpm()) hostBpm = juce::jlimit (20.0, 999.0, *b);
                 if (auto p = position->getPpqPosition()) ppq = *p;
                 if (auto sig = position->getTimeSignature())
-                    beatsPerBar = juce::jmax (1.0, sig->numerator * 4.0 / juce::jmax (1, sig->denominator));
+                    hostBeatsPerBar = juce::jmax (1.0, sig->numerator * 4.0 / juce::jmax (1, sig->denominator));
                 if (auto b = position->getPpqPositionOfLastBarStart()) { barStart = *b; hasBarStart = true; }
             }
     const double blockBeats = numSamples * hostBpm / (60.0 * sampleRate);
@@ -193,12 +193,12 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         auto startTake = [&]
         {
             // Recording may start mid-bar; remember how far it is to the next bar line.
-            const double intoBar = positiveMod (hasBarStart ? ppq - barStart : ppq, beatsPerBar);
-            captureSkipBeats = (! hostTransport || intoBar < 0.05) ? 0.0 : beatsPerBar - intoBar;
+            const double intoBar = positiveMod (hasBarStart ? ppq - barStart : ppq, hostBeatsPerBar);
+            captureSkipBeats = (! hostTransport || intoBar < 0.05) ? 0.0 : hostBeatsPerBar - intoBar;
             capturedSamples = 0;
             captureStartPpq = ppq;
             captureBpm = hostBpm;
-            captureBeatsPerBar = beatsPerBar;
+            captureBeatsPerBar = hostBeatsPerBar;
             captureSampleRate = sampleRate;
             expectedRecordPpq = ppq;
             recording = true;

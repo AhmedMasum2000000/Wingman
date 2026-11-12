@@ -46,9 +46,13 @@ struct ChromaFrames
     double windowSeconds = 0.0;
 };
 
+// Note names. The one-argument forms use a fixed neutral spelling (C C# D Eb E F F# G Ab A Bb B);
+// the forms that take a key spell the note the way that key is written (G# in E major, Ab in Eb major).
 std::string pitchClassName (int pitchClass);
+std::string pitchClassName (int pitchClass, Key key);
 std::string chordName (Chord chord);
-std::string keyName (Key key);
+std::string chordName (Chord chord, Key key);
+std::string keyName (Key key); // conventional spelling, e.g. "F# minor", "Bb major"
 
 // Analysis
 ChromaFrames computeChroma (const float* mono, size_t numSamples, double sampleRate);
@@ -60,6 +64,8 @@ std::vector<Note> audioToNotes (const float* mono, size_t numSamples, double sam
 // Harmony
 std::vector<Chord> chordsInKey (Key key);
 std::vector<Chord> rankChords (const Chroma& segment, Key key); // best fit first
+// Up to `count` progressions, best first, no two the same. Fewer are returned only when the
+// segments and the key's chords do not allow `count` different progressions.
 std::vector<std::vector<Chord>> suggestProgressions (const std::vector<Chroma>& segments,
                                                      Key key, int count);
 
