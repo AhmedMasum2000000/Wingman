@@ -6,25 +6,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: windows-latest, name: Windows }
-    runs-on: ${{ matrix.os }}
+  windows:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libx11-dev libxrandr-dev libxinerama-dev \
-            libxcursor-dev libxext-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev
-
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -32,11 +20,24 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
-      - name: Upload plugin
+      - name: Validate the VST3 with pluginval
+        shell: bash
+        run: |
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip
+          7z x -y pluginval.zip -opluginval > /dev/null
+          ./pluginval/pluginval.exe --strictness-level 8 --validate-in-process \
+            --validate "build/Backline_artefacts/Release/VST3/Backline.vst3"
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist/Backline
+          cp -r build/Backline_artefacts/Release/VST3/Backline.vst3 dist/Backline/
+          cp build/Backline_artefacts/Release/Standalone/Backline.exe dist/Backline/
+          cp installer/Install.bat installer/README.txt dist/Backline/
+
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: Backline-${{ matrix.name }}
-          path: |
-            build/Backline_artefacts/Release/VST3
-            build/Backline_artefacts/Release/AU
-            build/Backline_artefacts/Release/Standalone
+          name: Backline-Windows
+          path: dist

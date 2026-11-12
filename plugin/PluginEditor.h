@@ -3,6 +3,13 @@
 
 namespace ui
 {
+// Bundled typefaces, shared by every open editor and released with the last one.
+struct Fonts
+{
+    Fonts();
+    juce::Typeface::Ptr display, displayMedium, body, bodyBold;
+};
+
 class Look : public juce::LookAndFeel_V4
 {
 public:
@@ -36,7 +43,8 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override { peaks.clear(); }
     void update (bool force);
-    juce::String status;
+    juce::String message;          // shown when there is no take to describe
+    juce::StringArray facts;       // e.g. "8 bars", "120 BPM", "C major"
 
 private:
     BacklineProcessor& processor;
@@ -99,6 +107,7 @@ private:
     void timerCallback() override;
 
     BacklineProcessor& processor;
+    juce::SharedResourcePointer<ui::Fonts> fonts;
     ui::Look look;
     int lastRevision = -1, tick = 0;
     bool lastArmed = false, lastRecording = false;

@@ -126,6 +126,52 @@ int main()
     CHECK (restored.getProgression() == processor.getProgression());
     CHECK (restored.getKey().tonic == 0 && ! restored.hasCapture() && restored.hasProgression());
 
+    // Recording that starts one beat before a bar line must still line chords up with the bars,
+    // and a host re-preparing the plugin must not wipe the take.
+    {
+        BacklineProcessor late;
+        FakePlayHead head;
+        late.setPlayHead (&head);
+        late.setPlayConfigDetails (2, 2, sampleRate, blockSize);
+        late.prepareToPlay (sampleRate, blockSize);
+        const int chords[4][3] = { { 60, 64, 67 }, { 55, 59, 62 }, { 57, 60, 64 }, { 53, 57, 60 } };
+        juce::int64 pos = 0;
+        auto run = [&] (double seconds)
+        {
+            for (int done = 0; done < (int) (seconds * sampleRate); done += blockSize, pos += blockSize)
+            {
+                for (int i = 0; i < blockSize; ++i)
+                {
+                    const double t = (double) (pos + i) / sampleRate, ppq = 3.0 + t * 2.0;
+                    float v = 0.0f;
+                    for (int p : chords[((int) (ppq / 4.0)) % 4])
+                        v += 0.15f * (float) std::sin (juce::MathConstants<double>::twoPi * juce::MidiMessage::getMidiNoteInHertz (p) * t);
+                    buffer.setSample (0, i, v);
+                    buffer.setSample (1, i, v);
+                }
+                head.ppq = 3.0 + (double) pos / sampleRate * 2.0;
+                late.processBlock (buffer, midi);
+            }
+        };
+        late.setRecordArmed (true);
+        head.playing = true;
+        run (8.5); // one beat of bar 1 (C), then G, Am, F, C
+        head.playing = false;
+        run (0.1);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (400);
+        juce::String lateNames;
+        for (auto c : late.getProgression()) lateNames << backline::chordName (c) << " ";
+        std::printf ("mid-bar start: skipped %.2f beats, progression: %s\n", late.getBarOffsetBeats(), lateNames.toRawUTF8());
+        CHECK (std::abs (late.getBarOffsetBeats() - 1.0) < 0.05);
+        CHECK (lateNames == "G Am F C ");
+
+        late.prepareToPlay (sampleRate, blockSize);
+        float peak = 0.0f;
+        for (float v : late.getWaveform (64)) peak = juce::jmax (peak, v);
+        CHECK (peak > 0.1f);
+        CHECK (! late.getPartNotes (BacklineProcessor::Part::Chords).empty());
+    }
+
     std::printf (failures == 0 ? "All plugin tests passed\n" : "%d check(s) failed\n", failures);
     return failures == 0 ? 0 : 1;
 }

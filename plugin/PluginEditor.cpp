@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "BinaryData.h"
 
 using namespace backline;
 
@@ -6,37 +7,27 @@ namespace ui
 {
 namespace
 {
-const juce::Colour bgTop (0xff14161f), bgBottom (0xff0a0b10), panel (0xff191c27), panelEdge (0x14ffffff),
-                   control (0xff232735), text (0xffeef0f6), textDim (0xff8b90a3),
-                   accent (0xff5eead4), record (0xffff4d5e), bassColour (0xfffbbf5a), melodyColour (0xffa78bfa);
+// Flat, high-contrast palette: near-black surfaces, white type, one blue accent.
+const juce::Colour bg (0xff0f1113), surface (0xff17191c), control (0xff1f2226), border (0xff2b2e33),
+                   text (0xfff7f7f8), textDim (0xff8c9096), accent (0xff3478ff), onAccent (0xffffffff),
+                   record (0xffff4b4b);
 
-juce::Font font (float size, bool bold = false)
+juce::Font makeFont (const juce::Typeface::Ptr& face, float size)
 {
-    return juce::Font (juce::FontOptions (size, bold ? juce::Font::bold : juce::Font::plain));
+    return juce::Font (juce::FontOptions (face).withHeight (size));
 }
 
-// Small spaced-out capitals used for section labels.
-void drawLabel (juce::Graphics& g, const juce::String& s, juce::Rectangle<int> area,
-                juce::Colour colour = textDim, juce::Justification j = juce::Justification::centredLeft)
-{
-    g.setColour (colour);
-    g.setFont (font (11.0f, true).withExtraKerningFactor (0.14f));
-    g.drawText (s.toUpperCase(), area, j);
-}
+juce::Font display (float size)       { return makeFont (juce::SharedResourcePointer<Fonts>()->display, size); }
+juce::Font displayMedium (float size) { return makeFont (juce::SharedResourcePointer<Fonts>()->displayMedium, size); }
+juce::Font body (float size)          { return makeFont (juce::SharedResourcePointer<Fonts>()->body, size); }
+juce::Font bodyBold (float size)      { return makeFont (juce::SharedResourcePointer<Fonts>()->bodyBold, size); }
 
-void drawPanel (juce::Graphics& g, juce::Rectangle<float> area, float radius = 12.0f)
+void drawSurface (juce::Graphics& g, juce::Rectangle<float> area, float radius = 14.0f, juce::Colour edge = border)
 {
-    g.setColour (panel);
+    g.setColour (surface);
     g.fillRoundedRectangle (area, radius);
-    g.setColour (panelEdge);
+    g.setColour (edge);
     g.drawRoundedRectangle (area.reduced (0.5f), radius, 1.0f);
-}
-
-// Each scale degree gets its own hue, so the shape of a progression is visible at a glance.
-juce::Colour chordColour (Chord chord, Key key)
-{
-    static const float hues[12] = { 0.47f, 0.52f, 0.58f, 0.63f, 0.70f, 0.09f, 0.13f, 0.96f, 0.76f, 0.83f, 0.32f, 0.38f };
-    return juce::Colour::fromHSV (hues[(chord.root - key.tonic + 12) % 12], 0.62f, 0.96f, 1.0f);
 }
 
 juce::String romanNumeral (Chord chord, Key key)
@@ -47,7 +38,8 @@ juce::String romanNumeral (Chord chord, Key key)
 }
 
 // One octave of piano keys with the chord's notes lit.
-void drawKeyboard (juce::Graphics& g, juce::Rectangle<float> area, Chord chord, juce::Colour lit)
+void drawKeyboard (juce::Graphics& g, juce::Rectangle<float> area, Chord chord,
+                   juce::Colour white, juce::Colour black, juce::Colour lit, juce::Colour gapColour)
 {
     bool on[12] = {};
     on[chord.root] = on[(chord.root + (chord.quality == Quality::Major ? 4 : 3)) % 12] = on[(chord.root + 7) % 12] = true;
@@ -57,138 +49,142 @@ void drawKeyboard (juce::Graphics& g, juce::Rectangle<float> area, Chord chord, 
     const float w = area.getWidth() / 7.0f;
     for (int i = 0; i < 7; ++i)
     {
-        g.setColour (on[whites[i]] ? lit : juce::Colours::white.withAlpha (0.16f));
-        g.fillRoundedRectangle (area.getX() + (float) i * w + 0.75f, area.getY(), w - 1.5f, area.getHeight(), 1.5f);
+        g.setColour (on[whites[i]] ? lit : white);
+        g.fillRoundedRectangle (area.getX() + (float) i * w + 1.0f, area.getY(), w - 2.0f, area.getHeight(), 2.0f);
     }
     for (int i = 0; i < 5; ++i)
     {
-        const juce::Rectangle<float> key (area.getX() + blackPos[i] * w - w * 0.3f, area.getY(), w * 0.6f, area.getHeight() * 0.58f);
-        g.setColour (juce::Colour (0xff0d0e14));
-        g.fillRoundedRectangle (key.expanded (0.75f, 0.0f), 1.5f);
-        g.setColour (on[blacks[i]] ? lit : juce::Colour (0xff2a2e3c));
-        g.fillRoundedRectangle (key, 1.5f);
+        const juce::Rectangle<float> key (area.getX() + blackPos[i] * w - w * 0.28f, area.getY(), w * 0.56f, area.getHeight() * 0.6f);
+        g.setColour (gapColour);
+        g.fillRoundedRectangle (key.expanded (1.5f, 0.0f).withBottom (key.getBottom() + 1.5f), 2.0f);
+        g.setColour (on[blacks[i]] ? lit : black);
+        g.fillRoundedRectangle (key, 2.0f);
     }
 }
 }
 
 //==============================================================================
+Fonts::Fonts()
+    : display (juce::Typeface::createSystemTypefaceFor (BinaryData::SpaceGroteskBold_ttf, BinaryData::SpaceGroteskBold_ttfSize)),
+      displayMedium (juce::Typeface::createSystemTypefaceFor (BinaryData::SpaceGroteskMedium_ttf, BinaryData::SpaceGroteskMedium_ttfSize)),
+      body (juce::Typeface::createSystemTypefaceFor (BinaryData::InterMedium_ttf, BinaryData::InterMedium_ttfSize)),
+      bodyBold (juce::Typeface::createSystemTypefaceFor (BinaryData::InterSemiBold_ttf, BinaryData::InterSemiBold_ttfSize))
+{
+}
+
 Look::Look()
 {
     setColour (juce::ComboBox::textColourId, text);
-    setColour (juce::ComboBox::arrowColourId, textDim);
-    setColour (juce::PopupMenu::backgroundColourId, juce::Colour (0xff1e2230));
+    setColour (juce::PopupMenu::backgroundColourId, control);
     setColour (juce::PopupMenu::textColourId, text);
     setColour (juce::PopupMenu::headerTextColourId, textDim);
-    setColour (juce::PopupMenu::highlightedBackgroundColourId, accent.withAlpha (0.22f));
-    setColour (juce::PopupMenu::highlightedTextColourId, juce::Colours::white);
-    setColour (juce::TextButton::textColourOffId, textDim);
-    setColour (juce::TextButton::textColourOnId, juce::Colour (0xff06231f));
+    setColour (juce::PopupMenu::highlightedBackgroundColourId, accent);
+    setColour (juce::PopupMenu::highlightedTextColourId, onAccent);
+    setColour (juce::TextButton::textColourOffId, text);
+    setColour (juce::TextButton::textColourOnId, onAccent);
 }
 
 void Look::drawComboBox (juce::Graphics& g, int width, int height, bool, int, int, int, int, juce::ComboBox& box)
 {
     const auto area = juce::Rectangle<float> (0, 0, (float) width, (float) height).reduced (0.5f);
-    g.setColour (box.isMouseOver (true) ? control.brighter (0.08f) : control);
-    g.fillRoundedRectangle (area, 8.0f);
-    g.setColour (juce::Colours::white.withAlpha (box.hasKeyboardFocus (true) ? 0.25f : 0.08f));
-    g.drawRoundedRectangle (area, 8.0f, 1.0f);
+    const bool hot = box.isMouseOver (true);
+    g.setColour (control);
+    g.fillRoundedRectangle (area, 10.0f);
+    g.setColour (hot ? textDim : border);
+    g.drawRoundedRectangle (area, 10.0f, 1.0f);
 
     juce::Path arrow;
-    const float cx = (float) width - 15.0f, cy = (float) height * 0.5f;
+    const float cx = (float) width - 16.0f, cy = (float) height * 0.5f;
     arrow.startNewSubPath (cx - 4.0f, cy - 2.0f);
     arrow.lineTo (cx, cy + 2.0f);
     arrow.lineTo (cx + 4.0f, cy - 2.0f);
-    g.setColour (textDim);
+    g.setColour (hot ? text : textDim);
     g.strokePath (arrow, juce::PathStrokeType (1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 }
 
-juce::Font Look::getComboBoxFont (juce::ComboBox&) { return font (14.0f); }
-juce::Font Look::getPopupMenuFont() { return font (14.5f); }
-juce::Font Look::getTextButtonFont (juce::TextButton&, int) { return font (13.0f, true); }
+juce::Font Look::getComboBoxFont (juce::ComboBox&) { return body (13.5f); }
+juce::Font Look::getPopupMenuFont() { return body (14.0f); }
+juce::Font Look::getTextButtonFont (juce::TextButton&, int) { return bodyBold (13.0f); }
 
 void Look::drawPopupMenuBackground (juce::Graphics& g, int width, int height)
 {
-    g.fillAll (findColour (juce::PopupMenu::backgroundColourId));
-    g.setColour (juce::Colours::white.withAlpha (0.10f));
+    g.fillAll (control);
+    g.setColour (border);
     g.drawRect (0, 0, width, height);
 }
 
 void Look::drawButtonBackground (juce::Graphics& g, juce::Button& button, const juce::Colour&, bool highlighted, bool down)
 {
     const auto area = button.getLocalBounds().toFloat().reduced (0.5f);
-    const float radius = area.getHeight() * 0.5f;
     if (button.getToggleState())
     {
-        g.setGradientFill ({ accent.brighter (0.15f), 0.0f, 0.0f, accent.darker (0.15f), 0.0f, area.getHeight(), false });
-        g.fillRoundedRectangle (area, radius);
+        g.setColour (accent);
+        g.fillRoundedRectangle (area, 10.0f);
         return;
     }
-    const float alpha = ! button.isEnabled() ? 0.4f : 1.0f;
-    g.setColour ((down ? control.brighter (0.15f) : highlighted ? control.brighter (0.08f) : control).withMultipliedAlpha (alpha));
-    g.fillRoundedRectangle (area, radius);
-    g.setColour (juce::Colours::white.withAlpha (0.07f * alpha));
-    g.drawRoundedRectangle (area, radius, 1.0f);
+    const float alpha = button.isEnabled() ? 1.0f : 0.45f;
+    g.setColour ((down ? border : control).withMultipliedAlpha (alpha));
+    g.fillRoundedRectangle (area, 10.0f);
+    g.setColour ((highlighted && button.isEnabled() ? textDim : border).withMultipliedAlpha (alpha));
+    g.drawRoundedRectangle (area, 10.0f, 1.0f);
 }
 
-void Look::drawToggleButton (juce::Graphics& g, juce::ToggleButton& button, bool highlighted, bool)
+void Look::drawToggleButton (juce::Graphics& g, juce::ToggleButton& button, bool, bool)
 {
     const bool on = button.getToggleState();
-    const auto track = juce::Rectangle<float> (0.0f, ((float) button.getHeight() - 18.0f) * 0.5f, 32.0f, 18.0f);
-    g.setColour (on ? accent.withAlpha (highlighted ? 1.0f : 0.9f) : control.brighter (highlighted ? 0.15f : 0.05f));
-    g.fillRoundedRectangle (track, 9.0f);
-    g.setColour (on ? juce::Colour (0xff06231f) : textDim);
-    g.fillEllipse (juce::Rectangle<float> (14.0f, 14.0f).withCentre ({ on ? track.getRight() - 9.0f : track.getX() + 9.0f, track.getCentreY() }));
+    const auto track = juce::Rectangle<float> (0.0f, ((float) button.getHeight() - 20.0f) * 0.5f, 36.0f, 20.0f);
+    g.setColour (on ? accent : control);
+    g.fillRoundedRectangle (track, 10.0f);
+    if (! on)
+    {
+        g.setColour (border);
+        g.drawRoundedRectangle (track.reduced (0.5f), 10.0f, 1.0f);
+    }
+    g.setColour (on ? onAccent : textDim);
+    g.fillEllipse (juce::Rectangle<float> (14.0f, 14.0f).withCentre ({ on ? track.getRight() - 10.0f : track.getX() + 10.0f, track.getCentreY() }));
     g.setColour (on ? text : textDim);
-    g.setFont (font (13.5f));
-    g.drawText (button.getButtonText(), button.getLocalBounds().withTrimmedLeft (40), juce::Justification::centredLeft);
+    g.setFont (body (13.5f));
+    g.drawText (button.getButtonText(), button.getLocalBounds().withTrimmedLeft (46), juce::Justification::centredLeft);
 }
 
 void Look::drawLinearSlider (juce::Graphics& g, int x, int y, int width, int height, float sliderPos, float, float,
-                             juce::Slider::SliderStyle, juce::Slider& slider)
+                             juce::Slider::SliderStyle, juce::Slider&)
 {
     const float cy = (float) y + (float) height * 0.5f;
     const auto track = juce::Rectangle<float> ((float) x, cy - 2.0f, (float) width, 4.0f);
-    g.setColour (control.brighter (0.05f));
+    g.setColour (border);
     g.fillRoundedRectangle (track, 2.0f);
-    g.setColour (accent.withAlpha (slider.isEnabled() ? 1.0f : 0.4f));
+    g.setColour (text);
     g.fillRoundedRectangle (track.withRight (sliderPos), 2.0f);
-    g.setColour (juce::Colours::white);
-    g.fillEllipse (juce::Rectangle<float> (12.0f, 12.0f).withCentre ({ sliderPos, cy }));
+    g.fillEllipse (juce::Rectangle<float> (14.0f, 14.0f).withCentre ({ sliderPos, cy }));
 }
 
 //==============================================================================
 void RecordButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
 {
-    const auto area = getLocalBounds().toFloat();
-    const auto centre = area.getCentre();
-    const float radius = juce::jmin (area.getWidth(), area.getHeight()) * 0.5f - 8.0f;
-
-    if (armed || recording) // soft pulsing halo
-        for (int i = 3; i >= 1; --i)
-        {
-            g.setColour (record.withAlpha ((recording ? 0.10f : 0.05f) * (0.5f + 0.5f * pulse)));
-            g.fillEllipse (juce::Rectangle<float> (2.0f, 2.0f).withCentre (centre).expanded (radius + (float) i * 2.5f * (0.6f + 0.4f * pulse)));
-        }
-
+    const auto centre = getLocalBounds().toFloat().getCentre();
+    const float radius = (float) juce::jmin (getWidth(), getHeight()) * 0.5f - 7.0f;
     const auto disc = juce::Rectangle<float> (radius * 2.0f, radius * 2.0f).withCentre (centre);
-    if (recording)
-        g.setGradientFill ({ record.brighter (0.2f), centre.x, disc.getY(), record.darker (0.25f), centre.x, disc.getBottom(), false });
-    else
-        g.setColour (down ? control.brighter (0.15f) : highlighted ? control.brighter (0.08f) : control);
-    g.fillEllipse (disc);
-    g.setColour ((recording ? juce::Colours::white : record).withAlpha (recording ? 0.25f : armed ? 0.5f + 0.5f * pulse : 0.55f));
-    g.drawEllipse (disc.reduced (0.75f), 1.5f);
 
-    if (armed || recording) // stop square
+    if (armed || recording) // pulsing ring
     {
-        g.setColour (recording ? juce::Colours::white : record);
-        g.fillRoundedRectangle (juce::Rectangle<float> (radius * 0.62f, radius * 0.62f).withCentre (centre), 3.0f);
+        g.setColour (record.withAlpha (0.20f + 0.35f * pulse));
+        g.drawEllipse (disc.expanded (3.0f + 2.5f * pulse), 1.5f);
     }
+
+    // A white, slightly raised button; it turns red while a take is running.
+    g.setColour (juce::Colours::black.withAlpha (0.35f));
+    g.fillEllipse (disc.translated (0.0f, 2.0f));
+    g.setColour (recording ? record : (down ? juce::Colour (0xffd9d9dc) : highlighted ? juce::Colours::white : ui::text));
+    g.fillEllipse (disc);
+    g.setColour (juce::Colours::black.withAlpha (0.10f));
+    g.drawEllipse (disc.reduced (1.0f), 2.0f);
+
+    g.setColour (recording ? juce::Colours::white : record);
+    if (armed || recording)
+        g.fillRoundedRectangle (juce::Rectangle<float> (radius * 0.6f, radius * 0.6f).withCentre (centre), 3.0f);
     else
-    {
-        g.setColour (record);
         g.fillEllipse (juce::Rectangle<float> (radius * 0.72f, radius * 0.72f).withCentre (centre));
-    }
 }
 
 //==============================================================================
@@ -206,45 +202,64 @@ void WaveformView::paint (juce::Graphics& g)
     const auto area = getLocalBounds().toFloat();
     const bool recording = processor.isRecording();
     const bool hasAudio = processor.getRecordedSeconds() > 0.0 && (recording || processor.hasCapture());
-    const float midY = area.getCentreY() + 8.0f, maxHalf = area.getHeight() * 0.5f - 14.0f;
+    const float top = 30.0f, midY = top + (area.getHeight() - top) * 0.5f, maxHalf = (area.getHeight() - top) * 0.5f - 2.0f;
 
-    drawLabel (g, status, getLocalBounds().removeFromTop (16), recording ? record : textDim);
+    // Top row: either a sentence, or the facts about the take as small tags.
+    if (facts.isEmpty())
+    {
+        g.setColour (recording ? record : textDim);
+        g.setFont (body (13.0f));
+        g.drawText (message, getLocalBounds().removeFromTop (22), juce::Justification::centredLeft);
+    }
+    else
+    {
+        float x = 0.0f;
+        g.setFont (bodyBold (12.0f));
+        for (int i = 0; i < facts.size(); ++i)
+        {
+            const float w = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), facts[i]) + 18.0f;
+            const juce::Rectangle<float> tag (x, 0.0f, w, 22.0f);
+            const bool isKey = i == facts.size() - 1;
+            g.setColour (isKey ? accent : control);
+            g.fillRoundedRectangle (tag, 6.0f);
+            g.setColour (isKey ? onAccent : text);
+            g.drawText (facts[i], tag.toNearestInt(), juce::Justification::centred);
+            x += w + 6.0f;
+        }
+    }
 
     if (! hasAudio)
     {
-        // Resting state: a quiet dotted line.
-        g.setColour (juce::Colours::white.withAlpha (0.10f));
-        for (float x = area.getX(); x < area.getRight(); x += 6.0f)
-            g.fillRoundedRectangle (x, midY - 1.0f, 3.0f, 2.0f, 1.0f);
+        g.setColour (border);
+        for (float x = area.getX(); x < area.getRight(); x += 4.0f)
+            g.fillRoundedRectangle (x, midY - 1.5f, 2.5f, 3.0f, 1.25f);
         return;
     }
 
-    // Chord boundaries.
     const int numChords = (int) processor.getProgression().size();
-    if (! recording && numChords > 1)
+    if (! recording && numChords > 1) // chord boundaries
     {
-        g.setColour (juce::Colours::white.withAlpha (0.07f));
+        g.setColour (border);
         for (int i = 1; i < numChords; ++i)
-            g.fillRect (area.getX() + area.getWidth() * (float) i / (float) numChords, area.getY() + 20.0f, 1.0f, area.getHeight() - 20.0f);
+            g.fillRect (area.getX() + area.getWidth() * (float) i / (float) numChords, top, 1.0f, area.getHeight() - top);
     }
 
-    // Mirrored bars, lit up to the playhead.
+    // Mirrored bars; the part already played turns blue.
     const double loop = processor.getLoopBeats(), head = processor.getPlayheadBeats();
     const float headX = (head >= 0.0 && loop > 0.0 && ! recording) ? area.getX() + area.getWidth() * (float) (head / loop) : -1.0f;
-    const juce::Colour base = recording ? record : accent;
     float peakMax = 0.05f;
     for (float p : peaks) peakMax = juce::jmax (peakMax, p);
     for (size_t i = 0; i < peaks.size(); ++i)
     {
         const float x = area.getX() + (float) i * 4.0f;
-        const float h = juce::jmax (1.0f, std::sqrt (peaks[i] / peakMax) * maxHalf);
-        g.setColour (base.withAlpha (headX < 0.0f || recording ? 0.75f : (x <= headX ? 1.0f : 0.35f)));
+        const float h = juce::jmax (1.5f, std::sqrt (peaks[i] / peakMax) * maxHalf);
+        g.setColour (recording ? record : headX < 0.0f ? text.withAlpha (0.75f) : x <= headX ? accent : text.withAlpha (0.28f));
         g.fillRoundedRectangle (x, midY - h, 2.5f, h * 2.0f, 1.25f);
     }
     if (headX >= 0.0f)
     {
-        g.setColour (juce::Colours::white.withAlpha (0.9f));
-        g.fillRoundedRectangle (headX - 0.75f, area.getY() + 20.0f, 1.5f, area.getHeight() - 20.0f, 0.75f);
+        g.setColour (accent);
+        g.fillRoundedRectangle (headX - 1.0f, top - 4.0f, 2.0f, area.getHeight() - top + 4.0f, 1.0f);
     }
 }
 
@@ -267,22 +282,20 @@ void ChordStrip::paint (juce::Graphics& g)
     const auto key = processor.getKey();
     if (progression.empty())
     {
-        // Resting state: one dashed drop zone.
-        const auto zone = getLocalBounds().toFloat().reduced (4.0f, 0.0f);
-        g.setColour (juce::Colours::white.withAlpha (0.025f));
-        g.fillRoundedRectangle (zone, 12.0f);
+        const auto zone = getLocalBounds().toFloat();
         juce::Path outline, dashed;
-        outline.addRoundedRectangle (zone.reduced (0.5f), 12.0f);
-        const float dashes[2] = { 5.0f, 5.0f };
+        outline.addRoundedRectangle (zone.reduced (0.5f), 14.0f);
+        const float dashes[2] = { 6.0f, 6.0f };
         juce::PathStrokeType (1.0f).createDashedStroke (dashed, outline, dashes, 2);
-        g.setColour (juce::Colours::white.withAlpha (0.12f));
+        g.setColour (border);
         g.fillPath (dashed);
-        g.setColour (text.withAlpha (0.85f));
-        g.setFont (font (17.0f, true));
-        g.drawText ("Record a few bars to get chord ideas", getLocalBounds().translated (0, -11), juce::Justification::centred);
+        g.setColour (text);
+        g.setFont (display (24.0f));
+        g.drawText ("Record a few bars to get chord ideas", getLocalBounds().translated (0, -13), juce::Justification::centred);
         g.setColour (textDim);
-        g.setFont (font (13.5f));
-        g.drawText ("Start playback on a bar line, press the red button, then stop.", getLocalBounds().translated (0, 13), juce::Justification::centred);
+        g.setFont (body (13.5f));
+        g.drawText ("Press the record button while your track plays, then press it again to stop.",
+                    getLocalBounds().translated (0, 16), juce::Justification::centred);
         return;
     }
 
@@ -291,26 +304,38 @@ void ChordStrip::paint (juce::Graphics& g)
     for (size_t i = 0; i < progression.size(); ++i)
     {
         const auto chord = progression[i];
-        const auto colour = chordColour (chord, key);
         const bool active = (int) i == activeSegment, hot = (int) i == hovered;
-        const auto cell = juce::Rectangle<float> ((float) i * width, 0.0f, width, (float) getHeight()).reduced (gap, active ? 0.0f : 3.0f);
+        auto cell = juce::Rectangle<float> ((float) i * width, 0.0f, width, (float) getHeight());
+        cell = cell.withTrimmedLeft (i == 0 ? 0.0f : gap).withTrimmedRight (i + 1 == progression.size() ? 0.0f : gap);
 
-        g.setGradientFill ({ colour.withAlpha (active ? 0.62f : hot ? 0.34f : 0.24f), 0.0f, cell.getY(),
-                             colour.withAlpha (active ? 0.30f : hot ? 0.16f : 0.09f), 0.0f, cell.getBottom(), false });
-        g.fillRoundedRectangle (cell, 12.0f);
-        g.setColour (colour.withAlpha (active ? 1.0f : hot ? 0.75f : 0.38f));
-        g.drawRoundedRectangle (cell.reduced (0.75f), 12.0f, active ? 2.0f : 1.0f);
+        if (active)
+        {
+            g.setColour (accent);
+            g.fillRoundedRectangle (cell, 12.0f);
+        }
+        else
+            drawSurface (g, cell, 12.0f, hot ? accent : border);
 
-        auto inner = cell.reduced (juce::jmin (12.0f, width * 0.12f), 10.0f);
+        const juce::Colour ink = active ? onAccent : text, soft = active ? onAccent.withAlpha (0.65f) : textDim;
+        auto inner = cell.reduced (juce::jmin (14.0f, width * 0.12f), 12.0f);
         if (width > 44.0f)
-            drawLabel (g, romanNumeral (chord, key), inner.removeFromTop (14.0f).toNearestInt(), colour.brighter (0.3f));
+        {
+            const auto top = inner.removeFromTop (16.0f).toNearestInt();
+            g.setFont (bodyBold (12.0f));
+            g.setColour (soft);
+            g.drawText (romanNumeral (chord, key), top, juce::Justification::centredLeft);
+            if (width > 70.0f)
+                g.drawText (juce::String ((int) i + 1), top, juce::Justification::centredRight);
+        }
         const float keysHeight = juce::jmin (26.0f, inner.getHeight() * 0.28f);
         const auto keys = inner.removeFromBottom (keysHeight);
         if (width > 60.0f)
-            drawKeyboard (g, keys.withSizeKeepingCentre (juce::jmin (keys.getWidth(), 110.0f), keysHeight), chord, colour);
+            drawKeyboard (g, keys.withSizeKeepingCentre (juce::jmin (keys.getWidth(), 112.0f), keysHeight), chord,
+                          active ? onAccent.withAlpha (0.16f) : border, active ? onAccent.withAlpha (0.30f) : juce::Colour (0xff3a3e45),
+                          active ? onAccent : accent, active ? accent : surface);
 
-        g.setColour (juce::Colours::white);
-        g.setFont (font (juce::jlimit (15.0f, 40.0f, width * 0.36f), true));
+        g.setColour (ink);
+        g.setFont (display (juce::jlimit (16.0f, 46.0f, width * 0.40f)));
         g.drawFittedText (chordName (chord), inner.toNearestInt(), juce::Justification::centred, 1);
     }
 }
@@ -333,7 +358,7 @@ void ChordStrip::mouseDown (const juce::MouseEvent& e)
     const float width = (float) getWidth() / (float) progression.size();
     const auto target = localAreaToGlobal (juce::Rectangle<int> ((int) ((float) segment * width), 0, (int) width, getHeight()));
     juce::Component::SafePointer<ChordStrip> safe (this);
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (target).withMinimumWidth (190),
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (target).withMinimumWidth (200),
                         [safe, segment, alternatives] (int result)
                         {
                             if (safe != nullptr && result > 0)
@@ -352,7 +377,7 @@ PartTile::PartTile (BacklineProcessor& p, BacklineProcessor::Part whichPart, juc
 
 void PartTile::resized()
 {
-    rhythm.setBounds (getWidth() - 150, 10, 138, 26);
+    rhythm.setBounds (getWidth() - 152, 12, 138, 28);
 }
 
 void PartTile::update()
@@ -363,36 +388,28 @@ void PartTile::update()
 
 void PartTile::paint (juce::Graphics& g)
 {
-    const auto area = getLocalBounds().toFloat();
     const bool ready = ! notes.empty();
-    drawPanel (g, area);
-    if (ready && hover)
-    {
-        g.setColour (colour.withAlpha (0.55f));
-        g.drawRoundedRectangle (area.reduced (0.75f), 12.0f, 1.5f);
-    }
+    drawSurface (g, getLocalBounds().toFloat(), 14.0f, ready && hover ? accent : border);
 
-    auto inner = getLocalBounds().reduced (14, 10);
-    auto header = inner.removeFromTop (26);
-    g.setColour (colour.withAlpha (ready ? 1.0f : 0.4f));
-    g.fillEllipse (juce::Rectangle<float> (8.0f, 8.0f).withCentre ({ (float) header.getX() + 4.0f, (float) header.getCentreY() }));
-    drawLabel (g, title, header.withTrimmedLeft (16), ready ? text : textDim);
+    auto inner = getLocalBounds().reduced (14, 12);
+    g.setColour (ready ? text : textDim);
+    g.setFont (displayMedium (16.0f));
+    g.drawText (title, inner.removeFromTop (28), juce::Justification::centredLeft);
 
-    auto footer = inner.removeFromBottom (16);
-    drawLabel (g, ready ? "Drag into your DAW" : (part == BacklineProcessor::Part::Melody ? "Single-note audio only" : "Nothing yet"),
-               footer, ready && hover ? colour : textDim.withAlpha (0.8f));
+    auto footer = inner.removeFromBottom (18);
+    g.setFont (body (12.5f));
+    g.setColour (ready && hover ? accent : textDim);
+    g.drawText (ready ? "Drag into your DAW" : (part == BacklineProcessor::Part::Melody ? "For single-note audio" : "Nothing yet"),
+                footer, juce::Justification::centredLeft);
     if (ready) // grip dots
-    {
-        g.setColour (hover ? colour : textDim.withAlpha (0.6f));
         for (int r = 0; r < 2; ++r)
             for (int c = 0; c < 3; ++c)
-                g.fillEllipse ((float) footer.getRight() - 16.0f + (float) c * 6.0f, (float) footer.getY() + 3.0f + (float) r * 6.0f, 2.5f, 2.5f);
-    }
+                g.fillEllipse ((float) footer.getRight() - 16.0f + (float) c * 6.0f, (float) footer.getY() + 4.0f + (float) r * 6.0f, 2.5f, 2.5f);
 
     // Piano roll of the part.
-    const auto roll = inner.reduced (0, 6).toFloat();
-    g.setColour (juce::Colours::black.withAlpha (0.22f));
-    g.fillRoundedRectangle (roll, 6.0f);
+    const auto roll = inner.reduced (0, 8).toFloat();
+    g.setColour (bg);
+    g.fillRoundedRectangle (roll, 8.0f);
     if (! ready)
         return;
     int low = 127, high = 0;
@@ -404,16 +421,16 @@ void PartTile::paint (juce::Graphics& g)
     }
     length = juce::jmax (length, part == BacklineProcessor::Part::Melody ? 0.0 : processor.getLoopBeats());
     const int rows = juce::jmax (6, high - low + 1);
-    const auto grid = roll.reduced (5.0f, 4.0f);
+    const auto grid = roll.reduced (6.0f, 5.0f);
     const float rowHeight = grid.getHeight() / (float) rows;
     const float offset = (float) (rows - (high - low + 1)) * 0.5f;
-    g.setColour (colour.withAlpha (hover ? 1.0f : 0.85f));
+    g.setColour (colour);
     for (const auto& n : notes)
     {
         const float x = grid.getX() + grid.getWidth() * (float) (n.start / length);
-        const float w = juce::jmax (2.0f, grid.getWidth() * (float) (n.length / length) - 1.0f);
+        const float w = juce::jmax (2.5f, grid.getWidth() * (float) (n.length / length) - 1.5f);
         const float y = grid.getBottom() - ((float) (n.pitch - low) + offset + 1.0f) * rowHeight;
-        g.fillRoundedRectangle (x, y + 0.5f, w, juce::jmax (1.5f, rowHeight - 1.0f), 1.5f);
+        g.fillRoundedRectangle (x, y + 0.5f, w, juce::jmax (2.0f, rowHeight - 1.0f), 1.5f);
     }
 }
 
@@ -436,8 +453,8 @@ using namespace ui;
 BacklineEditor::BacklineEditor (BacklineProcessor& p)
     : AudioProcessorEditor (p), processor (p), waveform (p), chordStrip (p),
       chordsTile (p, BacklineProcessor::Part::Chords, "Chords", accent, true),
-      bassTile (p, BacklineProcessor::Part::Bass, "Bass", bassColour, true),
-      melodyTile (p, BacklineProcessor::Part::Melody, "Audio to MIDI", melodyColour, false)
+      bassTile (p, BacklineProcessor::Part::Bass, "Bass", text, true),
+      melodyTile (p, BacklineProcessor::Part::Melody, "Audio to MIDI", juce::Colour (0xffa9adb4), false)
 {
     setLookAndFeel (&look);
     for (auto* c : std::initializer_list<juce::Component*> { &recordButton, &waveform, &tonicBox, &modeBox, &changeBox,
@@ -483,27 +500,24 @@ BacklineEditor::~BacklineEditor() { setLookAndFeel (nullptr); }
 
 void BacklineEditor::paint (juce::Graphics& g)
 {
-    const auto area = getLocalBounds().toFloat();
-    g.setGradientFill ({ bgTop, 0.0f, 0.0f, bgBottom, 0.0f, area.getHeight(), false });
-    g.fillAll();
-    juce::ColourGradient glow (accent.withAlpha (0.10f), 80.0f, -40.0f, accent.withAlpha (0.0f), 80.0f, 300.0f, true);
-    g.setGradientFill (glow);
-    g.fillRect (area.withHeight (320.0f));
+    g.fillAll (bg);
 
-    // Logo: three stacked bars, like a chord.
-    const float lx = 24.0f, ly = 27.0f;
-    const float widths[3] = { 22.0f, 15.0f, 19.0f };
+    // Logo: a accent tile with three stacked bars, like a chord.
+    const juce::Rectangle<float> tile (24.0f, 20.0f, 34.0f, 34.0f);
+    g.setColour (accent);
+    g.fillRoundedRectangle (tile, 9.0f);
+    const float widths[3] = { 18.0f, 11.0f, 15.0f };
+    g.setColour (onAccent);
     for (int i = 0; i < 3; ++i)
-    {
-        g.setColour (accent.withAlpha (1.0f - 0.25f * (float) i));
-        g.fillRoundedRectangle (lx, ly + (float) i * 7.0f, widths[i], 4.5f, 2.25f);
-    }
+        g.fillRoundedRectangle (tile.getX() + 8.0f, tile.getY() + 8.5f + (float) i * 6.5f, widths[i], 4.0f, 2.0f);
     g.setColour (text);
-    g.setFont (font (19.0f, true).withExtraKerningFactor (0.16f));
-    g.drawText ("BACKLINE", 56, 22, 180, 30, juce::Justification::centredLeft);
+    g.setFont (display (23.0f));
+    g.drawText ("Backline", 68, 20, 200, 34, juce::Justification::centredLeft);
 
-    drawLabel (g, "Key", { tonicBox.getX() - 40, tonicBox.getY(), 34, tonicBox.getHeight() }, textDim, juce::Justification::centredRight);
-    drawPanel (g, recordButton.getBounds().getUnion (waveform.getBounds()).expanded (14, 12).toFloat());
+    g.setColour (textDim);
+    g.setFont (body (13.0f));
+    g.drawText ("Key", juce::Rectangle<int> (tonicBox.getX() - 44, tonicBox.getY(), 36, tonicBox.getHeight()), juce::Justification::centredRight);
+    drawSurface (g, recordButton.getBounds().getUnion (waveform.getBounds()).expanded (16, 14).toFloat());
 }
 
 void BacklineEditor::resized()
@@ -514,13 +528,13 @@ void BacklineEditor::resized()
     modeBox.setBounds (header.removeFromRight (96));
     header.removeFromRight (6);
     tonicBox.setBounds (header.removeFromRight (66));
-    header.removeFromRight (64);
+    header.removeFromRight (68);
     volume.setBounds (header.removeFromRight (96).reduced (0, 4));
-    header.removeFromRight (4);
-    previewButton.setBounds (header.removeFromRight (104));
-    area.removeFromTop (30);
+    header.removeFromRight (6);
+    previewButton.setBounds (header.removeFromRight (112));
+    area.removeFromTop (32);
 
-    auto capture = area.removeFromTop (88).reduced (14, 0);
+    auto capture = area.removeFromTop (88).reduced (16, 0);
     recordButton.setBounds (capture.removeFromLeft (76).withSizeKeepingCentre (76, 76));
     capture.removeFromLeft (12);
     waveform.setBounds (capture);
@@ -529,10 +543,10 @@ void BacklineEditor::resized()
     auto row = area.removeFromTop (30);
     for (auto* b : ideaButtons)
     {
-        b->setBounds (row.removeFromLeft (78));
+        b->setBounds (row.removeFromLeft (84));
         row.removeFromLeft (6);
     }
-    changeBox.setBounds (row.removeFromRight (140));
+    changeBox.setBounds (row.removeFromRight (150));
     area.removeFromTop (12);
 
     chordStrip.setBounds (area.removeFromTop (156));
@@ -583,19 +597,23 @@ void BacklineEditor::refresh()
     recordButton.recording = recording;
     recordButton.repaint();
 
+    waveform.facts.clear();
     if (recording)
-        waveform.status = "Recording  " + juce::String (processor.getRecordedSeconds(), 1) + " s";
+        waveform.message = "Recording  " + juce::String (processor.getRecordedSeconds(), 1) + " s";
     else if (armed)
-        waveform.status = "Waiting for playback to start";
+        waveform.message = "Waiting for playback to start";
     else if (processor.hasCapture())
-        waveform.status = juce::String (juce::roundToInt (processor.getLoopBeats() / 4.0)) + " bars   "
-                        + juce::String (processor.getBpm(), 1) + " BPM   " + keyName (processor.getKey());
+    {
+        const int bars = juce::roundToInt (processor.getLoopBeats() / 4.0);
+        waveform.facts = { juce::String (bars) + (bars == 1 ? " bar" : " bars"),
+                           juce::String (juce::roundToInt (processor.getBpm())) + " BPM", keyName (processor.getKey()) };
+    }
     else if (processor.hasProgression())
-        waveform.status = "Progression restored - record again for new ideas";
+        waveform.message = "Progression restored. Record again for new ideas.";
     else if (processor.getRecordedSeconds() > 0.0)
-        waveform.status = "That take was too short - record at least a bar";
+        waveform.message = "That take was too short. Record at least one bar.";
     else
-        waveform.status = "Put Backline on the track you want to build around";
+        waveform.message = "Put Backline on the track you want to build around.";
 
     const auto key = processor.getKey();
     tonicBox.setSelectedId (key.tonic + 1, juce::dontSendNotification);

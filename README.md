@@ -22,8 +22,8 @@ other instruments, drums.
 ## Using it
 
 1. Put Backline on the audio track you want to build around.
-2. Start playback from the beginning of a bar, press **Record**, let a few bars play, press **Stop**
-   (or stop the DAW).
+2. Start playback, press the record button, let a few bars play, then press it again
+   (or stop the DAW). If you start mid-bar, Backline waits for the next bar line.
 3. Try the ideas 1-4, click chords to change them, pick rhythms.
 4. Drag the MIDI tiles onto instrument tracks.
 
@@ -37,9 +37,9 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The plugin ends up in `build/Backline_artefacts/Release/`. Every push also builds the Windows
-version in GitHub Actions; download it from the run's artifacts and copy `Backline.vst3` into
-`C:\Program Files\Common Files\VST3`.
+The plugin ends up in `build/Backline_artefacts/Release/`. Every push builds the Windows
+version in GitHub Actions, validates it with pluginval and uploads a `Backline-Windows`
+package containing `Backline.vst3`, the standalone `Backline.exe` and `Install.bat`.
 
 On Linux install first: `libasound2-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev
 libxext-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev`.

@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
 
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>") # no VC++ redistributable needed
+
 option(BACKLINE_BUILD_PLUGIN "Build the JUCE plugin (downloads JUCE)" ON)
 
 add_library(backline_core STATIC
@@ -42,12 +44,17 @@ if(BACKLINE_BUILD_PLUGIN)
         NEEDS_MIDI_OUTPUT FALSE
         COPY_PLUGIN_AFTER_BUILD FALSE)
 
+    juce_add_binary_data(BacklineAssets SOURCES
+        assets/SpaceGrotesk-Bold.ttf assets/SpaceGrotesk-Medium.ttf
+        assets/Inter-Medium.ttf assets/Inter-SemiBold.ttf)
+    set_target_properties(BacklineAssets PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
     target_sources(Backline PRIVATE plugin/PluginProcessor.cpp plugin/PluginEditor.cpp)
     target_compile_definitions(Backline PUBLIC
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0
         JUCE_DISPLAY_SPLASH_SCREEN=0)
     target_link_libraries(Backline
-        PRIVATE backline_core juce::juce_audio_utils
+        PRIVATE backline_core BacklineAssets juce::juce_audio_utils
         PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 
     juce_add_console_app(backline_plugin_tests)
@@ -55,7 +62,7 @@ if(BACKLINE_BUILD_PLUGIN)
         tests/PluginTests.cpp plugin/PluginProcessor.cpp plugin/PluginEditor.cpp)
     target_compile_definitions(backline_plugin_tests PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
-    target_link_libraries(backline_plugin_tests PRIVATE backline_core juce::juce_audio_utils)
+    target_link_libraries(backline_plugin_tests PRIVATE backline_core BacklineAssets juce::juce_audio_utils)
     add_test(NAME plugin COMMAND backline_plugin_tests)
 
     juce_add_console_app(backline_screenshot)
@@ -63,5 +70,5 @@ if(BACKLINE_BUILD_PLUGIN)
         tests/Screenshot.cpp plugin/PluginProcessor.cpp plugin/PluginEditor.cpp)
     target_compile_definitions(backline_screenshot PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
-    target_link_libraries(backline_screenshot PRIVATE backline_core juce::juce_audio_utils)
+    target_link_libraries(backline_screenshot PRIVATE backline_core BacklineAssets juce::juce_audio_utils)
 endif()

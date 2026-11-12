@@ -91,8 +91,13 @@ BacklineProcessor::~BacklineProcessor() { stopTimer(); }
 void BacklineProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
-    if (! recording.load())
-        capture.assign ((size_t) (sampleRate * maxCaptureSeconds), 0.0f);
+    // Hosts call this often (some on every transport start), so keep an existing take.
+    const auto needed = (size_t) (sampleRate * maxCaptureSeconds);
+    if (! recording.load() && capture.size() != needed)
+    {
+        capture.assign (needed, 0.0f);
+        capturedSamples = 0;
+    }
     chordSynth.setCurrentPlaybackSampleRate (sampleRate);
     bassSynth.setCurrentPlaybackSampleRate (sampleRate);
     synthBuffer.setSize (2, samplesPerBlock);
@@ -138,14 +143,17 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         buffer.clear (ch, 0, numSamples);
 
     // Transport: use the host's when there is one, otherwise a free-running clock (standalone).
-    double hostBpm = 120.0, ppq = internalPpq;
-    bool playing = true;
+    double hostBpm = 120.0, ppq = internalPpq, beatsPerBar = 4.0, barStart = 0.0;
+    bool playing = true, hasBarStart = false;
     if (auto* hostPlayHead = getPlayHead())
         if (auto position = hostPlayHead->getPosition())
         {
             playing = position->getIsPlaying();
             if (auto b = position->getBpm()) hostBpm = *b;
             if (auto p = position->getPpqPosition()) ppq = *p;
+            if (auto sig = position->getTimeSignature())
+                beatsPerBar = juce::jmax (1.0, sig->numerator * 4.0 / juce::jmax (1, sig->denominator));
+            if (auto b = position->getPpqPositionOfLastBarStart()) { barStart = *b; hasBarStart = true; }
         }
     const double blockBeats = numSamples * hostBpm / (60.0 * currentSampleRate);
     internalPpq += blockBeats;
@@ -155,6 +163,9 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         if (! recording.load() && playing && ! capture.empty())
         {
+            // Recording may start mid-bar; remember how far it is to the next bar line.
+            const double intoBar = hasBarStart ? ppq - barStart : positiveMod (ppq, beatsPerBar);
+            captureSkipBeats = (intoBar < 0.05 || intoBar > beatsPerBar) ? 0.0 : beatsPerBar - intoBar;
             capturedSamples = 0;
             captureStartPpq = ppq;
             captureBpm = hostBpm;
@@ -236,12 +247,22 @@ void BacklineProcessor::timerCallback()
 
 void BacklineProcessor::analyseCapture()
 {
-    const auto count = (size_t) capturedSamples.load();
+    const auto total = (size_t) capturedSamples.load();
     bpm = captureBpm.load();
-    originPpq = captureStartPpq.load();
-    totalBeats = (double) count / currentSampleRate * bpm / 60.0;
-    chroma = computeChroma (capture.data(), count, currentSampleRate);
-    melodyNotes = audioToNotes (capture.data(), count, currentSampleRate, bpm);
+    const double samplesPerBeat = currentSampleRate * 60.0 / bpm;
+
+    // Start on the first bar line, unless that would leave less than a bar of audio.
+    double skipBeats = captureSkipBeats.load();
+    if ((double) total - skipBeats * samplesPerBeat < 4.0 * samplesPerBeat)
+        skipBeats = 0.0;
+    analysisOffset = (int) (skipBeats * samplesPerBeat);
+    const auto count = total - (size_t) analysisOffset;
+    const float* audio = capture.data() + analysisOffset;
+
+    originPpq = captureStartPpq.load() + skipBeats;
+    totalBeats = (double) count / samplesPerBeat;
+    chroma = computeChroma (audio, count, currentSampleRate);
+    melodyNotes = audioToNotes (audio, count, currentSampleRate, bpm);
     if (chroma.frames.empty())
     {
         ++revision;
@@ -329,7 +350,8 @@ std::vector<float> BacklineProcessor::getWaveform (int numPoints) const
 {
     // Samples below capturedSamples are never rewritten during a take, so this is safe to read live.
     std::vector<float> peaks ((size_t) juce::jmax (0, numPoints), 0.0f);
-    const int count = juce::jmin (capturedSamples.load(), (int) capture.size());
+    const int offset = recording.load() ? 0 : analysisOffset;
+    const int count = juce::jmin (capturedSamples.load(), (int) capture.size()) - offset;
     if (count <= 0 || numPoints <= 0)
         return peaks;
     const double perPoint = (double) count / numPoints;
@@ -339,7 +361,7 @@ std::vector<float> BacklineProcessor::getWaveform (int numPoints) const
         const int begin = (int) (i * perPoint), end = juce::jmin (count, (int) ((i + 1) * perPoint) + 1);
         float peak = 0.0f;
         for (int k = begin; k < end; k += stride)
-            peak = juce::jmax (peak, std::abs (capture[(size_t) k]));
+            peak = juce::jmax (peak, std::abs (capture[(size_t) (offset + k)]));
         peaks[(size_t) i] = juce::jmin (1.0f, peak);
     }
     return peaks;

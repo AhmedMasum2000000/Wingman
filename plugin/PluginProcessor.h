@@ -32,6 +32,7 @@ public:
     bool isRecordArmed() const { return recordArmed.load(); }
     bool isRecording() const { return recording.load(); }
     double getRecordedSeconds() const;
+    double getBarOffsetBeats() const { return captureSkipBeats.load(); }
 
     bool hasProgression() const { return ! progression.empty(); }
     bool hasCapture() const { return ! segments.empty(); }
@@ -82,7 +83,8 @@ private:
     std::vector<float> capture;
     std::atomic<int> capturedSamples { 0 };
     std::atomic<bool> recordArmed { false }, recording { false }, analysisPending { false };
-    std::atomic<double> captureStartPpq { 0.0 }, captureBpm { 120.0 };
+    std::atomic<double> captureStartPpq { 0.0 }, captureBpm { 120.0 }, captureSkipBeats { 0.0 };
+    int analysisOffset = 0; // samples skipped so the analysis starts on a bar line
     double currentSampleRate = 44100.0, internalPpq = 0.0;
 
     // Session state (message thread)
