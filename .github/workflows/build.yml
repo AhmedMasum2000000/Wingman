@@ -4,6 +4,14 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Publish a GitHub release with this version (for example 0.1.0). Leave empty to only build."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
 
 jobs:
   windows:
@@ -35,9 +43,41 @@ jobs:
           cp -r build/Backline_artefacts/Release/VST3/Backline.vst3 dist/Backline/
           cp build/Backline_artefacts/Release/Standalone/Backline.exe dist/Backline/
           cp installer/Install.bat installer/README.txt dist/Backline/
+          cd dist && 7z a -tzip ../Backline-Windows.zip Backline > /dev/null
+
+      - name: Test the install script
+        shell: pwsh
+        run: |
+          $env:BACKLINE_ZIP = "$PWD\Backline-Windows.zip"
+          powershell -NoProfile -ExecutionPolicy Bypass -File installer\install.ps1
+          $plugin = Join-Path $env:CommonProgramFiles 'VST3\Backline.vst3\Contents\x86_64-win\Backline.vst3'
+          if (-not (Test-Path $plugin)) { throw "Plugin was not installed to $plugin" }
+          if (-not (Test-Path (Join-Path $env:ProgramFiles 'Backline\Backline.exe'))) { throw 'Standalone app was not installed' }
+          Write-Host 'Install script works.'
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: Backline-Windows
           path: dist
+
+      - name: Publish release
+        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Backline ${{ inputs.version }}
+          body: |
+            Backline for Windows (64-bit): VST3 plugin and standalone app.
+
+            **Install from Command Prompt**
+            ```
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/AhmedMasum2000000/Wingman/releases/latest/download/install.ps1 | iex"
+            ```
+            Or download `Backline-Windows.zip`, unzip it and double-click `Install.bat`.
+
+            The files are not code-signed, so Windows may show an "unknown publisher" warning.
+          files: |
+            Backline-Windows.zip
+            installer/install.ps1

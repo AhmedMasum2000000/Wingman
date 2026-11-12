@@ -19,6 +19,18 @@ code, models or content from any commercial product.
 Not built yet: stem separation, polyphonic audio-to-MIDI, WAV export, effects, hosting
 other instruments, drums.
 
+## Install on Windows
+
+In Command Prompt:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/AhmedMasum2000000/Wingman/releases/latest/download/install.ps1 | iex"
+```
+
+Or download [Backline-Windows.zip](https://github.com/AhmedMasum2000000/Wingman/releases/latest/download/Backline-Windows.zip),
+unzip it and double-click `Install.bat`. Then rescan plugins in your DAW. The files are not
+code-signed, so Windows may show an "unknown publisher" warning.
+
 ## Using it
 
 1. Put Backline on the audio track you want to build around.
