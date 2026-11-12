@@ -4,6 +4,8 @@ An original audio plugin (VST3 / AU / standalone) that listens to audio in your 
 suggests chords and a bassline that fit it. Written from scratch with JUCE; it contains no
 code, models or content from any commercial product.
 
+![Backline interface](docs/screenshot.png)
+
 ## What it does today
 
 - **Record** audio from the track it sits on, in time with the host transport.
@@ -35,8 +37,9 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The plugin ends up in `build/Backline_artefacts/Release/`. Every push also builds macOS,
-Windows and Linux versions in GitHub Actions; download them from the run's artifacts.
+The plugin ends up in `build/Backline_artefacts/Release/`. Every push also builds the Windows
+version in GitHub Actions; download it from the run's artifacts and copy `Backline.vst3` into
+`C:\Program Files\Common Files\VST3`.
 
 On Linux install first: `libasound2-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev
 libxext-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev`.
@@ -45,6 +48,7 @@ libxext-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev`.
 
 - `core/` - analysis and harmony engine, plain C++ with no dependencies
 - `plugin/` - JUCE plugin (audio capture, preview synth, interface)
-- `tests/` - engine tests and an end-to-end plugin test with a simulated transport
+- `tests/` - engine tests, an end-to-end plugin test with a simulated transport, and a tool
+  that renders the interface to PNG (`backline_screenshot <dir>`)
 
 JUCE is used under its AGPLv3 option, which is fine for personal and open-source use.

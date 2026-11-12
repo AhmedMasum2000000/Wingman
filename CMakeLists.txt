@@ -57,4 +57,11 @@ if(BACKLINE_BUILD_PLUGIN)
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
     target_link_libraries(backline_plugin_tests PRIVATE backline_core juce::juce_audio_utils)
     add_test(NAME plugin COMMAND backline_plugin_tests)
+
+    juce_add_console_app(backline_screenshot)
+    target_sources(backline_screenshot PRIVATE
+        tests/Screenshot.cpp plugin/PluginProcessor.cpp plugin/PluginEditor.cpp)
+    target_compile_definitions(backline_screenshot PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_link_libraries(backline_screenshot PRIVATE backline_core juce::juce_audio_utils)
 endif()

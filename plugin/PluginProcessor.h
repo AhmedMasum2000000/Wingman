@@ -53,6 +53,12 @@ public:
 
     enum class Part { Chords, Bass, Melody };
     juce::File writeMidiFile (Part part);
+    std::vector<backline::Note> getPartNotes (Part part) const;
+
+    // For the display
+    std::vector<float> getWaveform (int numPoints) const;   // peak per point, 0..1
+    double getLoopBeats() const { return (double) progression.size() * beatsPerChord; }
+    double getPlayheadBeats() const { return playheadBeats.load(); } // -1 when not playing
 
     std::atomic<bool> previewEnabled { true };
     std::atomic<float> previewGain { 0.7f };
@@ -86,6 +92,8 @@ private:
     double bpm = 120.0, originPpq = 0.0, totalBeats = 0.0, beatsPerChord = 4.0;
     std::vector<std::vector<backline::Chord>> ideas;
     std::vector<backline::Chord> progression;
+    std::vector<backline::Note> melodyNotes;
+    std::atomic<double> playheadBeats { -1.0 };
     int selectedIdea = 0, revision = 0;
     backline::ChordRhythm chordRhythm = backline::ChordRhythm::Sustain;
     backline::BassRhythm bassRhythm = backline::BassRhythm::Eighths;

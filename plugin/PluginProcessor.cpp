@@ -195,12 +195,13 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 
     chordMidi.clear();
     bassMidi.clear();
-    const bool shouldPlay = playing && previewEnabled.load() && activePlayback != nullptr
-                         && activePlayback->lengthBeats > 0.0;
+    const bool hasLoop = playing && activePlayback != nullptr && activePlayback->lengthBeats > 0.0;
+    const double loop = hasLoop ? activePlayback->lengthBeats : 1.0;
+    const double startBeat = hasLoop ? positiveMod (ppq - activePlayback->originPpq, loop) : -1.0;
+    playheadBeats = startBeat;
+    const bool shouldPlay = hasLoop && previewEnabled.load();
     if (shouldPlay)
     {
-        const double loop = activePlayback->lengthBeats;
-        const double startBeat = positiveMod (ppq - activePlayback->originPpq, loop);
         scheduleNotes (activePlayback->chords, chordMidi, startBeat, blockBeats, loop, numSamples);
         scheduleNotes (activePlayback->bass, bassMidi, startBeat, blockBeats, loop, numSamples);
     }
@@ -240,6 +241,7 @@ void BacklineProcessor::analyseCapture()
     originPpq = captureStartPpq.load();
     totalBeats = (double) count / currentSampleRate * bpm / 60.0;
     chroma = computeChroma (capture.data(), count, currentSampleRate);
+    melodyNotes = audioToNotes (capture.data(), count, currentSampleRate, bpm);
     if (chroma.frames.empty())
     {
         ++revision;
@@ -312,19 +314,42 @@ void BacklineProcessor::updatePlayback()
     ++revision;
 }
 
-juce::File BacklineProcessor::writeMidiFile (Part part)
+std::vector<Note> BacklineProcessor::getPartNotes (Part part) const
 {
-    std::vector<Note> notes;
-    juce::String name;
     switch (part)
     {
-        case Part::Chords: notes = renderChords (progression, beatsPerChord, chordRhythm); name = "Backline Chords"; break;
-        case Part::Bass:   notes = renderBass (progression, beatsPerChord, bassRhythm);    name = "Backline Bass"; break;
-        case Part::Melody:
-            notes = audioToNotes (capture.data(), (size_t) capturedSamples.load(), currentSampleRate, bpm);
-            name = "Backline Audio to MIDI";
-            break;
+        case Part::Chords: return renderChords (progression, beatsPerChord, chordRhythm);
+        case Part::Bass:   return renderBass (progression, beatsPerChord, bassRhythm);
+        case Part::Melody: break;
     }
+    return hasCapture() ? melodyNotes : std::vector<Note>();
+}
+
+std::vector<float> BacklineProcessor::getWaveform (int numPoints) const
+{
+    // Samples below capturedSamples are never rewritten during a take, so this is safe to read live.
+    std::vector<float> peaks ((size_t) juce::jmax (0, numPoints), 0.0f);
+    const int count = juce::jmin (capturedSamples.load(), (int) capture.size());
+    if (count <= 0 || numPoints <= 0)
+        return peaks;
+    const double perPoint = (double) count / numPoints;
+    const int stride = juce::jmax (1, (int) (perPoint / 48.0));
+    for (int i = 0; i < numPoints; ++i)
+    {
+        const int begin = (int) (i * perPoint), end = juce::jmin (count, (int) ((i + 1) * perPoint) + 1);
+        float peak = 0.0f;
+        for (int k = begin; k < end; k += stride)
+            peak = juce::jmax (peak, std::abs (capture[(size_t) k]));
+        peaks[(size_t) i] = juce::jmin (1.0f, peak);
+    }
+    return peaks;
+}
+
+juce::File BacklineProcessor::writeMidiFile (Part part)
+{
+    const auto notes = getPartNotes (part);
+    const juce::String name = part == Part::Chords ? "Backline Chords"
+                            : part == Part::Bass   ? "Backline Bass" : "Backline Audio to MIDI";
     if (notes.empty())
         return {};
     const auto bytes = backline::writeMidiFile (notes, bpm);
@@ -369,6 +394,7 @@ void BacklineProcessor::setStateInformation (const void* data, int sizeInBytes)
 
     // The captured audio is not stored in the session, only the chosen progression.
     chroma = {};
+    melodyNotes.clear();
     segments.clear();
     ideas.clear();
     progression.clear();
