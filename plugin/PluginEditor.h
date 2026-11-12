@@ -29,6 +29,9 @@ public:
 
 // "V7", "ii", "IVmaj7", "vii" + degree sign: the chord's function in the key.
 juce::String romanNumeral (backline::Chord chord, backline::Key key);
+// What the bass note of a chord is, by its interval above the root: "Third in the bass" for C/E,
+// "Fourth in the bass" for Csus4/F. Empty for a note that is no chord tone.
+juce::String bassNoteLabel (backline::Chord chord);
 
 // Where the chord cards go. The loop is laid out in rows of equal length (whole bars when there
 // is more than one row); a card's width is proportional to its length, and a chord that crosses
@@ -45,7 +48,9 @@ struct StripLayout
     std::vector<juce::Rectangle<float>> pieces (double start, double length) const;
     // The beat under a point (the row under it, clamped to the loop).
     double beatAt (juce::Point<float> point) const;
-    // The boundary (between chord i and i + 1) within `tolerance` pixels of the point, or -1.
+    // The boundary (between chord i and i + 1) within `tolerance` pixels of the point, or -1. The
+    // zone reaches at most a quarter of the way into the card on either side, so the middle of
+    // even a narrow card is the card (its menu), never a boundary.
     int boundaryAt (const backline::Progression& progression, juce::Point<float> point, float tolerance) const;
     // The line a boundary at `beat` is drawn on (at the end of a row for a beat on a row break).
     juce::Line<float> boundaryLine (double beat) const;
@@ -95,7 +100,8 @@ private:
     void timerCallback() override;
     void commit (double bpm);
     void closeEditor (bool apply);
-    double shown = BacklineProcessor::defaultTempo, dragStart = 0.0;
+    double shown = BacklineProcessor::defaultTempo, dragStart = 0.0, wheelStart = 0.0;
+    int wheelSteps = 0;
     bool dragging = false, moved = false;
     std::unique_ptr<juce::TextEditor> editor;
 };
@@ -156,12 +162,17 @@ public:
     Menu buildMenu (int index) const;
     // Does what choosing `result` from that menu means. Returns true if the progression changed.
     static bool applyMenuResult (BacklineProcessor&, int index, int result, const std::vector<backline::Chord>& choices);
+    // The same, but only while the progression is still `shown`, the one the menu was built from.
+    // A new take or tempo can replace it while the menu is open; then the choice is dropped.
+    static bool applyMenuResult (BacklineProcessor&, const backline::Progression& shown, int index, int result,
+                                 const std::vector<backline::Chord>& choices);
     // Shows the resize feedback for a boundary as if the mouse were on it (-1 for none).
     void showBoundary (int boundary, bool dragging);
 
 private:
     BacklineProcessor& processor;
     int hovered = -1, hoveredBoundary = -1, draggedBoundary = -1;
+    backline::Progression dragBase; // the progression as the boundary drag last left it
 };
 
 // A part (chords, bass, audio-to-MIDI) shown as a small piano roll, with MIDI (and for chords

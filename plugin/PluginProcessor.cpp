@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <cstring>
 
 using namespace backline;
 
@@ -31,7 +32,7 @@ juce::String extensionList()
     return formats.getWildcardForAllFormats().removeCharacters ("*.").replaceCharacter (',', ';');
 }
 
-juce::File exportFolder (const void* instance)
+juce::File midiExportFolder (const void* instance)
 {
     // One folder per plugin instance, so two instances never overwrite each other's file mid-drag.
     auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory)
@@ -45,6 +46,43 @@ juce::String partName (BacklineProcessor::Part part)
     return part == BacklineProcessor::Part::Chords ? "Backline Chords"
          : part == BacklineProcessor::Part::Bass   ? "Backline Bass" : "Backline Audio to MIDI";
 }
+
+// Where exported audio goes by default: a folder the user keeps, because DAWs refer to dropped audio there.
+juce::File defaultExportFolder()
+{
+    auto base = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+    if (! base.isDirectory())
+        base = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+    return base.getChildFile ("Backline").getChildFile ("Exports");
+}
+
+// FNV-1a over the samples, to recognise audio that was exported before.
+juce::uint64 hashOf (const juce::AudioBuffer<float>& audio, double sampleRate)
+{
+    juce::uint64 hash = 14695981039346656037ull;
+    auto mix = [&hash] (juce::uint64 value)
+    {
+        for (int i = 0; i < 8; ++i)
+        {
+            hash ^= (value >> (i * 8)) & 0xffu;
+            hash *= 1099511628211ull;
+        }
+    };
+    mix ((juce::uint64) std::llround (sampleRate * 1000.0));
+    mix ((juce::uint64) audio.getNumChannels());
+    mix ((juce::uint64) audio.getNumSamples());
+    for (int ch = 0; ch < audio.getNumChannels(); ++ch)
+    {
+        const float* data = audio.getReadPointer (ch);
+        for (int i = 0; i < audio.getNumSamples(); ++i)
+        {
+            juce::uint32 bits = 0;
+            std::memcpy (&bits, data + i, sizeof (bits));
+            mix (bits);
+        }
+    }
+    return hash;
+}
 }
 
 BacklineProcessor::BacklineProcessor()
@@ -52,6 +90,7 @@ BacklineProcessor::BacklineProcessor()
                                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
     soundsFolder = instruments::defaultSoundsFolder();
+    exportFolder = defaultExportFolder();
     for (int p = 0; p < 2; ++p)
     {
         requestedInstrument[p] = instruments::builtInName;
@@ -77,6 +116,7 @@ void BacklineProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     for (auto& synth : activeSynth)
         synth->setCurrentPlaybackSampleRate (sampleRate);
     synthBuffer.setSize (2, samplesPerBlock);
+    fadeBuffer.setSize (2, samplesPerBlock);
     chordMidi.ensureSize (4096);
     bassMidi.ensureSize (4096);
     haltPreviewAndTake();
@@ -94,6 +134,8 @@ void BacklineProcessor::haltPreviewAndTake()
 {
     for (auto& synth : activeSynth)
         synth->allNotesOff (0, false);
+    for (auto& left : fadeSamplesLeft)
+        left = 0; // a replaced instrument still fading out falls silent (it is handed back later)
     wasPlaying = takeWasPlaying = false;
     nextBeat = takeNextBeat = -1.0;
     takeMain.active = takeTail.active = takeSwapWaiting = false;
@@ -280,14 +322,23 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 }
             }
             for (int p = 0; p < 2; ++p)
-                if (pendingSynth[p] != nullptr && releasedSynth[p] == nullptr)
+            {
+                // A replaced instrument that has faded out goes back to be freed.
+                if (fadingSynth[p] != nullptr && fadeSamplesLeft[p] <= 0 && releasedSynth[p] == nullptr)
+                    releasedSynth[p] = std::move (fadingSynth[p]);
+                if (pendingSynth[p] != nullptr && fadingSynth[p] == nullptr)
                 {
-                    releasedSynth[p] = std::move (activeSynth[p]);
+                    // The old instrument lets its notes go and fades out over 50 ms while the new
+                    // one picks up the notes already under way, so the change does not click.
+                    fadingSynth[p] = std::move (activeSynth[p]);
+                    fadingSynth[p]->allNotesOff (0, true);
+                    fadeSamples[p] = fadeSamplesLeft[p] = juce::jmax (1, (int) (0.05 * sampleRate));
                     activeSynth[p] = std::move (pendingSynth[p]);
                     if (std::abs (activeSynth[p]->getSampleRate() - sampleRate) > 1.0e-6)
                         activeSynth[p]->setCurrentPlaybackSampleRate (sampleRate);
-                    nextBeat = -1.0; // the new instrument picks up the notes already under way
+                    nextBeat = -1.0;
                 }
+            }
         }
     }
 
@@ -349,6 +400,21 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     juce::AudioBuffer<float> synthView (synthBuffer.getArrayOfWritePointers(), 2, numSamples);
     chordSynth.renderNextBlock (synthView, chordMidi, 0, numSamples);
     bassSynth.renderNextBlock (synthView, bassMidi, 0, numSamples);
+    for (int p = 0; p < 2; ++p)
+        if (fadingSynth[p] != nullptr && fadeSamplesLeft[p] > 0)
+        {
+            if (fadeBuffer.getNumSamples() < numSamples)
+                fadeBuffer.setSize (2, numSamples, false, false, true);
+            juce::AudioBuffer<float> fadeView (fadeBuffer.getArrayOfWritePointers(), 2, numSamples);
+            fadeView.clear();
+            fadingSynth[p]->renderNextBlock (fadeView, noMidi, 0, numSamples);
+            const int count = juce::jmin (numSamples, fadeSamplesLeft[p]);
+            const float from = (float) fadeSamplesLeft[p] / (float) fadeSamples[p];
+            const float to = (float) (fadeSamplesLeft[p] - count) / (float) fadeSamples[p];
+            for (int ch = 0; ch < 2; ++ch)
+                synthView.addFromWithRamp (ch, 0, fadeView.getReadPointer (ch), count, from, to);
+            fadeSamplesLeft[p] -= count;
+        }
     const float gain = previewGain.load();
     for (int ch = 0; ch < numChannels && ch < getTotalNumOutputChannels(); ++ch)
         buffer.addFrom (ch, 0, synthBuffer, juce::jmin (ch, 1), 0, numSamples, gain);
@@ -606,10 +672,11 @@ void BacklineProcessor::installAnalysis (Analysis&& analysis, bool newTake, bool
         estimatedBpm = analysis.estimatedBpm;
         playTake = take->fromFile || ! fromHostRecording;
     }
-    rebuildIdeas();
+    // The same take at another tempo: fresh ideas, but chords the user has edited stay as they are.
+    rebuildIdeas (! newTake && progressionEdited);
 }
 
-void BacklineProcessor::rebuildIdeas()
+void BacklineProcessor::rebuildIdeas (bool keepProgression)
 {
     if (chroma.frames.empty())
     {
@@ -620,12 +687,18 @@ void BacklineProcessor::rebuildIdeas()
     const int numSegments = juce::jlimit (1, maxChords, juce::roundToInt (totalBeats / beatsPerChord));
     segments = segmentChroma (chroma, bpm, beatsPerChord, numSegments);
     ideas = suggestProgressions (segments, key, 4);
-    selectedIdea = 0;
-    if (! ideas.empty())
+    if (keepProgression && ! progression.empty())
+        selectedIdea = juce::jlimit (0, juce::jmax (0, (int) ideas.size() - 1), selectedIdea);
+    else
     {
-        progression = toProgression (ideas.front(), beatsPerChord);
-        if (sevenths)
-            progression = withSevenths (progression, key);
+        selectedIdea = 0;
+        if (! ideas.empty())
+        {
+            progression = toProgression (ideas.front(), beatsPerChord);
+            if (sevenths)
+                progression = withSevenths (progression, key);
+            progressionEdited = false;
+        }
     }
     updatePlayback();
 }
@@ -683,6 +756,7 @@ void BacklineProcessor::selectIdea (int index)
         progression = toProgression (ideas[(size_t) index], getBeatsPerChord());
         if (sevenths)
             progression = withSevenths (progression, key);
+        progressionEdited = false;
     }
     updatePlayback();
 }
@@ -699,6 +773,7 @@ bool BacklineProcessor::editProgression (const std::function<Progression (const 
     if (next == progression || ! isValidProgression (next) || (int) next.size() > maxChords)
         return false;
     progression = std::move (next);
+    progressionEdited = true;
     updatePlayback();
     return true;
 }
@@ -802,7 +877,7 @@ void BacklineProcessor::updatePlayback()
 {
     const juce::ScopedLock stateGuard (stateLock);
     auto playback = std::make_shared<Playback>();
-    playback->chords = renderChords (progression, chordRhythm);
+    playback->chords = renderChords (progression, chordRhythm, beatsPerBar);
     playback->bass = renderBass (progression, bassRhythm);
     playback->lengthBeats = progressionLength (progression);
     playback->originPpq = originPpq;
@@ -828,7 +903,7 @@ std::vector<Note> BacklineProcessor::getPartNotes (Part part) const
     const juce::ScopedLock lock (stateLock);
     switch (part)
     {
-        case Part::Chords: return renderChords (progression, chordRhythm);
+        case Part::Chords: return renderChords (progression, chordRhythm, beatsPerBar);
         case Part::Bass:   return renderBass (progression, bassRhythm);
         case Part::Melody: break;
     }
@@ -1028,10 +1103,11 @@ double BacklineProcessor::getTempo() const
 void BacklineProcessor::setManualTempo (double newBpm)
 {
     newBpm = juce::jlimit (minManualTempo, maxManualTempo, newBpm);
-    manualBpm = newBpm;
+    const bool changed = std::abs (newBpm - manualBpm.exchange (newBpm)) > 1.0e-9;
     if (hostTransport.load())
     {
-        ++revision;
+        if (changed)
+            ++revision;
         return;
     }
     {
@@ -1039,8 +1115,15 @@ void BacklineProcessor::setManualTempo (double newBpm)
         if (take == nullptr || chroma.frames.empty() || recording.load())
         {
             bpm = newBpm; // nothing to re-analyse; exports use the new tempo
-            ++revision;
+            if (changed)
+                ++revision;
             return;
+        }
+        if (std::abs (bpm - newBpm) <= 1.0e-9)
+        {
+            if (changed)
+                ++revision;
+            return; // the take is analysed at this tempo already: nothing to redo, nothing lost
         }
     }
     requestReanalysis();
@@ -1124,10 +1207,23 @@ juce::String BacklineProcessor::getLoadedInstrument (Part part) const
     return loadedInstrument[partIndex (part)]->name;
 }
 
+bool BacklineProcessor::isInstrumentLoading (Part part) const
+{
+    if (part == Part::Melody)
+        return false;
+    const juce::ScopedLock lock (stateLock);
+    return loadingInstrument[partIndex (part)].isNotEmpty();
+}
+
 void BacklineProcessor::installInstrument (int index, instruments::InstrumentPtr instrument)
 {
     if (instrument == nullptr)
         instrument = instruments::builtIn();
+    {
+        const juce::ScopedLock lock (stateLock);
+        if (loadedInstrument[index] == instrument)
+            return; // already playing (instruments are shared while unchanged), so nothing to switch
+    }
     auto synth = instruments::createSynth (instrument, index == 1, currentSampleRate.load());
     std::unique_ptr<juce::Synthesiser> old; // freed here, never on the audio thread
     {
@@ -1148,8 +1244,10 @@ void BacklineProcessor::startInstrumentLoad (int index, const juce::String& name
         const juce::ScopedLock lock (stateLock);
         root = soundsFolder;
         ticket = ++instrumentTicket[index];
+        loadingInstrument[index] = name;
     }
     ++pendingInstrumentLoads;
+    ++revision; // the interface shows the part as loading
     worker.addJob ([this, index, name, root, ticket]
     {
         auto instrument = instruments::loadInstrument (root, name);
@@ -1161,7 +1259,12 @@ void BacklineProcessor::startInstrumentLoad (int index, const juce::String& name
                 current = ticket == instrumentTicket[index];
             }
             if (current)
+            {
                 installInstrument (index, instrument); // nullptr (folder gone or empty) falls back to the synth
+                const juce::ScopedLock lock (stateLock);
+                if (ticket == instrumentTicket[index])
+                    loadingInstrument[index].clear();
+            }
             --pendingInstrumentLoads;
             ++revision;
         });
@@ -1174,16 +1277,28 @@ void BacklineProcessor::setInstrument (Part part, const juce::String& name)
         return;
     const int index = partIndex (part);
     const bool synth = name.isEmpty() || name.equalsIgnoreCase (instruments::builtInName);
+    const juce::String wanted = synth ? juce::String (instruments::builtInName) : name;
+    bool load = false;
     {
         const juce::ScopedLock lock (stateLock);
-        requestedInstrument[index] = synth ? juce::String (instruments::builtInName) : name;
-        if (synth)
-            ++instrumentTicket[index]; // cancels a load still running
+        requestedInstrument[index] = wanted;
+        if (loadingInstrument[index] == wanted)
+        {
+            // already on its way
+        }
+        else if (synth || loadedInstrument[index]->name == wanted)
+        {
+            ++instrumentTicket[index]; // nothing to load: cancel a load of another one still running
+            loadingInstrument[index].clear();
+        }
+        else
+            load = true;
     }
     if (synth)
-        installInstrument (index, instruments::builtIn());
-    else
-        startInstrumentLoad (index, name);
+        installInstrument (index, instruments::builtIn()); // does nothing when the synth is already playing
+    else if (load)
+        startInstrumentLoad (index, wanted);
+    ++revision;
 }
 
 juce::StringArray BacklineProcessor::getInstrumentNames()
@@ -1226,7 +1341,7 @@ juce::File BacklineProcessor::writeMidiFile (Part part)
     if (notes.empty())
         return {};
     const auto bytes = backline::writeMidiFile (notes, getBpm());
-    auto file = exportFolder (this).getChildFile (partName (part) + ".mid");
+    auto file = midiExportFolder (this).getChildFile (partName (part) + ".mid");
     return file.replaceWithData (bytes.data(), bytes.size()) ? file : juce::File();
 }
 
@@ -1248,14 +1363,42 @@ juce::AudioBuffer<float> BacklineProcessor::renderPartAudio (Part part, double s
     return instruments::renderNotes (notes, loop, getTempo(), sampleRate, instrument, part == Part::Bass, 4.0);
 }
 
+void BacklineProcessor::setExportFolder (const juce::File& folder)
+{
+    const juce::ScopedLock lock (stateLock);
+    exportFolder = folder;
+}
+
 juce::File BacklineProcessor::writeWavFile (Part part)
 {
+    // Until the selected instrument has loaded, the synth would play instead of it.
+    if (part == Part::Melody || isInstrumentLoading (part))
+        return {};
     const double rate = currentSampleRate.load() >= 8000.0 ? currentSampleRate.load() : 48000.0;
     const auto audio = renderPartAudio (part, rate);
     if (audio.getNumSamples() == 0)
         return {};
-    auto file = exportFolder (this).getChildFile (partName (part) + ".wav");
-    file.deleteFile();
+
+    // The same audio as the last export of this part, and that file is still as it was written:
+    // hand it out again rather than leave another copy.
+    const int index = partIndex (part);
+    const auto hash = hashOf (audio, rate);
+    juce::File folder;
+    {
+        const juce::ScopedLock lock (stateLock);
+        const auto& last = lastWav[index];
+        if (last.hash == hash && last.file.existsAsFile() && last.file.getSize() == last.size
+            && last.file.getLastModificationTime() == last.modified)
+            return last.file;
+        folder = exportFolder;
+    }
+
+    // A new file every time: a DAW may still refer to the earlier ones.
+    if (! folder.createDirectory())
+        folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("Backline").getChildFile ("Exports");
+    folder.createDirectory();
+    const auto file = folder.getChildFile (partName (part) + " " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S") + ".wav")
+                          .getNonexistentSibling();
     auto stream = file.createOutputStream();
     if (stream == nullptr)
         return {};
@@ -1266,7 +1409,14 @@ juce::File BacklineProcessor::writeWavFile (Part part)
     stream.release(); // the writer owns it now
     const bool ok = writer->writeFromAudioSampleBuffer (audio, 0, audio.getNumSamples());
     writer.reset();
-    return ok ? file : juce::File();
+    if (! ok)
+    {
+        file.deleteFile(); // never handed out
+        return {};
+    }
+    const juce::ScopedLock lock (stateLock);
+    lastWav[index] = { file, hash, file.getSize(), file.getLastModificationTime() };
+    return file;
 }
 
 //==============================================================================
@@ -1291,8 +1441,10 @@ void BacklineProcessor::getStateInformation (juce::MemoryBlock& destData)
         for (const auto& e : progression)
         {
             legacy.add (juce::String (e.chord.root) + (hasMinorThird (e.chord.quality) ? "m" : "M"));
+            // root:quality:bass:start:length:flags (1 = 7th added by the Sevenths setting, 2 = spelled with a sharp)
+            const int flags = (e.coloured ? 1 : 0) | (e.chord.sharpRoot ? 2 : 0);
             events.add (juce::String (e.chord.root) + ":" + juce::String ((int) e.chord.quality) + ":" + juce::String (e.chord.bass)
-                        + ":" + juce::String (e.start, 9) + ":" + juce::String (e.length, 9));
+                        + ":" + juce::String (e.start, 9) + ":" + juce::String (e.length, 9) + ":" + juce::String (flags));
         }
         xml.setAttribute ("progression", legacy.joinIntoString (" "));
         xml.setAttribute ("events", events.joinIntoString (" "));
@@ -1346,7 +1498,7 @@ void BacklineProcessor::setStateInformation (const void* data, int sizeInBytes)
         for (const auto& token : juce::StringArray::fromTokens (xml->getStringAttribute ("events"), " ", ""))
         {
             const auto fields = juce::StringArray::fromTokens (token, ":", "");
-            if (fields.size() != 5 || (int) restored.size() >= maxChords)
+            if (fields.size() < 5 || fields.size() > 6 || (int) restored.size() >= maxChords)
             {
                 restored.clear();
                 break;
@@ -1357,6 +1509,9 @@ void BacklineProcessor::setStateInformation (const void* data, int sizeInBytes)
             e.chord.bass = juce::jlimit (-1, 11, fields[2].getIntValue());
             e.start = fields[3].getDoubleValue();
             e.length = fields[4].getDoubleValue();
+            const int flags = fields.size() > 5 ? fields[5].getIntValue() : 0; // not written by early 0.2 builds
+            e.coloured = (flags & 1) != 0;
+            e.chord.sharpRoot = (flags & 2) != 0;
             restored.push_back (e);
         }
         if (! isValidProgression (restored))
@@ -1370,6 +1525,7 @@ void BacklineProcessor::setStateInformation (const void* data, int sizeInBytes)
             restored = chords.empty() ? Progression() : toProgression (chords, beatsPerBar * chordRate);
         }
         progression = std::move (restored);
+        progressionEdited = true; // the user's chords: a later re-analysis of the same take keeps them
         updatePlayback();
     }
 

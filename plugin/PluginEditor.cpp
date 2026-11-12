@@ -109,6 +109,20 @@ juce::String romanNumeral (Chord chord, Key key)
     return n;
 }
 
+juce::String bassNoteLabel (Chord chord)
+{
+    switch ((((chord.bassPitchClass() - chord.root) % 12) + 12) % 12)
+    {
+        case 0:           return "Root in the bass";
+        case 2:           return "Second in the bass";
+        case 3: case 4:   return "Third in the bass";
+        case 5:           return "Fourth in the bass";
+        case 6: case 7:   return "Fifth in the bass";
+        case 10: case 11: return "Seventh in the bass";
+        default:          return {};
+    }
+}
+
 //==============================================================================
 StripLayout StripLayout::make (const Progression& progression, double beatsPerBar, float width, float height)
 {
@@ -186,26 +200,38 @@ int StripLayout::boundaryAt (const Progression& progression, juce::Point<float> 
 {
     int best = -1;
     float bestDistance = tolerance;
-    auto consider = [&] (int index, juce::Line<float> line)
+    // `left` and `right`: the widths of the card pieces on either side of the line (0 for none).
+    auto consider = [&] (int index, juce::Line<float> line, float left, float right)
     {
         if (point.y < line.getStartY() || point.y > line.getEndY())
             return;
-        const float d = std::abs (point.x - line.getStartX());
+        const float offset = point.x - line.getStartX();
+        const float reachLeft = left > 0.0f ? juce::jmin (tolerance, 0.25f * left) : tolerance;
+        const float reachRight = right > 0.0f ? juce::jmin (tolerance, 0.25f * right) : tolerance;
+        if (offset < -reachLeft || offset > reachRight)
+            return;
+        const float d = std::abs (offset);
         if (d <= bestDistance)
         {
             best = index;
             bestDistance = d;
         }
     };
+    auto span = [this] (double from, double to) { return (float) ((to - from) / beatsPerRow) * width; };
     for (size_t i = 0; i + 1 < progression.size(); ++i)
     {
-        const double beat = progression[i].start + progression[i].length;
-        consider ((int) i, boundaryLine (beat));
-        const double rowsIn = beat / beatsPerRow;
-        if (std::abs (rowsIn - std::round (rowsIn)) < 1.0e-9) // on a row break: also the start of the next row
+        const auto& before = progression[i];
+        const auto& after = progression[i + 1];
+        const double beat = before.start + before.length, afterEnd = after.start + after.length;
+        const int row = juce::jmax (0, (int) std::floor (beat / beatsPerRow - 1.0e-9)); // as boundaryLine draws it
+        const double rowStart = row * beatsPerRow, rowEnd = rowStart + beatsPerRow;
+        const bool rowBreak = beat > rowEnd - 1.0e-9;
+        consider ((int) i, boundaryLine (beat), span (juce::jmax (before.start, rowStart), beat),
+                  rowBreak ? 0.0f : span (beat, juce::jmin (afterEnd, rowEnd)));
+        if (rowBreak) // also the start of the next row
         {
-            const float rh = rowHeight(), y = (float) std::round (rowsIn) * rh;
-            consider ((int) i, { 0.0f, y, 0.0f, y + rh });
+            const float rh = rowHeight(), y = (float) (row + 1) * rh;
+            consider ((int) i, { 0.0f, y, 0.0f, y + rh }, 0.0f, span (beat, juce::jmin (afterEnd, rowEnd + beatsPerRow)));
         }
     }
     return best;
@@ -452,9 +478,12 @@ void TempoField::mouseDrag (const juce::MouseEvent& e)
     if (! moved && e.getDistanceFromDragStart() < 3)
         return;
     moved = dragging = true;
-    const double perPixel = e.mods.isShiftDown() ? 0.1 : 0.5; // shift: fine steps
-    double next = dragStart - (double) e.getDistanceFromDragStartY() * perPixel;
-    next = e.mods.isShiftDown() ? std::round (next * 10.0) / 10.0 : std::round (next);
+    const bool fine = e.mods.isShiftDown();
+    const double change = -(double) e.getDistanceFromDragStartY() * (fine ? 0.1 : 0.5); // shift: fine steps
+    // Back where it began (less than one step away): exactly the tempo it began at, even 97.43.
+    double next = dragStart;
+    if (std::abs (change) >= (fine ? 0.05 : 0.5))
+        next = fine ? std::round ((dragStart + change) * 10.0) / 10.0 : std::round (dragStart + change);
     next = juce::jlimit (BacklineProcessor::minManualTempo, BacklineProcessor::maxManualTempo, next);
     if (std::abs (next - shown) > 1.0e-9)
     {
@@ -478,8 +507,16 @@ void TempoField::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheel
 {
     if (editor != nullptr || std::abs (wheel.deltaY) < 1.0e-6f)
         return;
-    shown = juce::jlimit (BacklineProcessor::minManualTempo, BacklineProcessor::maxManualTempo,
-                          std::round (shown) + (wheel.deltaY > 0.0f ? 1.0 : -1.0));
+    if (! isTimerRunning()) // a new turn of the wheel
+    {
+        wheelStart = shown;
+        wheelSteps = 0;
+    }
+    wheelSteps += wheel.deltaY > 0.0f ? 1 : -1;
+    // Whole BPM steps; turned back to where it began, exactly the tempo it began at.
+    shown = wheelSteps == 0 ? wheelStart
+                            : juce::jlimit (BacklineProcessor::minManualTempo, BacklineProcessor::maxManualTempo,
+                                            std::round (wheelStart) + (double) wheelSteps);
     repaint();
     startTimer (450); // apply once the wheel stops
 }
@@ -674,22 +711,45 @@ void ChordStrip::paint (juce::Graphics& g)
 
     const auto l = StripLayout::make (progression, processor.getBeatsPerBar(), (float) getWidth(), (float) getHeight());
     const bool manyRows = l.rows > 1;
+    auto cellOf = [manyRows] (juce::Rectangle<float> full)
+    {
+        return full.reduced (full.getWidth() > 24.0f ? 2.0f : 1.0f, manyRows ? 2.0f : 0.0f);
+    };
+    auto innerOf = [] (juce::Rectangle<float> cell)
+    {
+        return cell.reduced (juce::jmin (14.0f, cell.getWidth() * 0.12f), juce::jmin (12.0f, cell.getHeight() * 0.08f));
+    };
+    auto mainPiece = [] (const std::vector<juce::Rectangle<float>>& pieces) // the widest piece of a card
+    {
+        size_t main = 0;
+        for (size_t p = 1; p < pieces.size(); ++p)
+            if (pieces[p].getWidth() > pieces[main].getWidth() + 0.5f)
+                main = p;
+        return main;
+    };
+
+    // Each card numbered, but only if every card has room for its number: a sequence with a gap
+    // in it looks like a missing chord.
+    const auto labelFont = bodyBold (12.0f);
+    bool showIndices = true;
+    for (size_t i = 0; i < progression.size() && showIndices; ++i)
+    {
+        const auto pieces = l.pieces (progression[i].start, progression[i].length);
+        showIndices = ! pieces.empty()
+                   && innerOf (cellOf (pieces[mainPiece (pieces)])).getWidth() >= textWidth (labelFont, juce::String ((int) i + 1)) + 2.0f;
+    }
+
     for (size_t i = 0; i < progression.size(); ++i)
     {
         const auto& event = progression[i];
         const bool active = (int) i == activeSegment, hot = (int) i == hovered && hoveredBoundary < 0 && draggedBoundary < 0;
         const auto pieces = l.pieces (event.start, event.length);
-        size_t main = 0;
-        for (size_t p = 1; p < pieces.size(); ++p)
-            if (pieces[p].getWidth() > pieces[main].getWidth() + 0.5f)
-                main = p;
+        const size_t main = mainPiece (pieces);
 
         const juce::String name (chordName (event.chord, key));
         for (size_t p = 0; p < pieces.size(); ++p)
         {
-            const auto& full = pieces[p];
-            const float halfGap = full.getWidth() > 24.0f ? 2.0f : 1.0f;
-            const auto cell = full.reduced (halfGap, manyRows ? 2.0f : 0.0f);
+            const auto cell = cellOf (pieces[p]);
             const float width = cell.getWidth(), height = cell.getHeight();
             if (width < 3.0f)
                 continue;
@@ -703,17 +763,26 @@ void ChordStrip::paint (juce::Graphics& g)
                 drawSurface (g, cell, radius, hot ? accent : border);
 
             const juce::Colour ink = active ? onAccent : text, soft = active ? onAccent.withAlpha (0.65f) : textDim;
-            auto inner = cell.reduced (juce::jmin (14.0f, width * 0.12f), juce::jmin (12.0f, height * 0.08f));
-            if (p == main && width > 44.0f && height > 70.0f)
+            auto inner = innerOf (cell);
+            if (height > 70.0f) // the top row is kept on every card so the names line up
             {
-                const auto topRow = inner.removeFromTop (16.0f).toNearestInt();
-                const auto numeral = romanNumeral (event.chord, key);
-                const bool showIndex = width > 70.0f && textWidth (bodyBold (12.0f), numeral) + 24.0f < inner.getWidth();
-                g.setFont (bodyBold (12.0f));
-                g.setColour (soft);
-                g.drawText (numeral, showIndex ? topRow.withTrimmedRight (22) : topRow, juce::Justification::centredLeft, true);
-                if (showIndex)
-                    g.drawText (juce::String ((int) i + 1), topRow, juce::Justification::centredRight);
+                const auto topRow = inner.removeFromTop (16.0f);
+                if (p == main)
+                {
+                    // The number first; the numeral where there is room left for all of it.
+                    g.setFont (labelFont);
+                    g.setColour (soft);
+                    float numeralRoom = topRow.getWidth();
+                    if (showIndices)
+                    {
+                        const juce::String index ((int) i + 1);
+                        g.drawText (index, topRow, juce::Justification::centredRight, false);
+                        numeralRoom -= textWidth (labelFont, index) + 8.0f;
+                    }
+                    const auto numeral = romanNumeral (event.chord, key);
+                    if (textWidth (labelFont, numeral) <= numeralRoom)
+                        g.drawText (numeral, topRow.withWidth (numeralRoom), juce::Justification::centredLeft, false);
+                }
             }
             if (height > 110.0f) // room for the keys is kept on every card so the names line up
             {
@@ -802,6 +871,7 @@ void ChordStrip::mouseDown (const juce::MouseEvent& e)
     const int boundary = l.boundaryAt (progression, e.position, 5.0f);
     if (boundary >= 0)
     {
+        dragBase = progression;
         showBoundary (boundary, true);
         return;
     }
@@ -820,11 +890,11 @@ void ChordStrip::mouseDown (const juce::MouseEvent& e)
     auto choices = built.choices;
     built.menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withTargetScreenArea (localAreaToGlobal (target.toNearestInt()))
                                                         .withMinimumWidth (220),
-                              [safe, index, choices] (int result)
+                              [safe, index, choices, shown = progression] (int result)
                               {
                                   if (safe != nullptr && result > 0)
                                   {
-                                      applyMenuResult (safe->processor, index, result, choices);
+                                      applyMenuResult (safe->processor, shown, index, result, choices);
                                       safe->repaint();
                                   }
                               });
@@ -834,8 +904,16 @@ void ChordStrip::mouseDrag (const juce::MouseEvent& e)
 {
     if (draggedBoundary < 0)
         return;
+    if (processor.getProgression() != dragBase)
+    {
+        // Replaced under the mouse (a new take or tempo): the boundary being dragged is gone.
+        draggedBoundary = hoveredBoundary = -1;
+        repaint();
+        return;
+    }
     // Live: the chords and the preview follow the mouse, snapped to the grid.
     processor.moveChordBoundary (draggedBoundary, layout().beatAt (e.position));
+    dragBase = processor.getProgression();
     repaint();
 }
 
@@ -876,20 +954,12 @@ ChordStrip::Menu ChordStrip::buildMenu (int index) const
 
     // Same root: other chord types, and which note is in the bass.
     juce::PopupMenu types, inversions;
-    const auto tones = chordPitchClasses (current);
     for (const auto& v : processor.getVariations (index))
     {
-        const bool sameType = v.quality == current.quality;
-        if (! sameType)
+        if (v.quality != current.quality)
             types.addItem (item (v, romanNumeral (v, key)));
         else
-        {
-            const int bassNote = v.bassPitchClass();
-            const juce::String where = bassNote == (((v.root % 12) + 12) % 12) ? "Root in the bass"
-                                     : (tones.size() > 1 && bassNote == tones[1]) ? "Third in the bass"
-                                     : (tones.size() > 2 && bassNote == tones[2]) ? "Fifth in the bass" : "";
-            inversions.addItem (item (v, where));
-        }
+            inversions.addItem (item (v, bassNoteLabel (v)));
     }
     m.menu.addSeparator();
     m.menu.addSubMenu ("Chord type", types, types.getNumItems() > 0);
@@ -910,6 +980,12 @@ ChordStrip::Menu ChordStrip::buildMenu (int index) const
     m.menu.addItem (passing);
     m.menu.addItem (deleteId, "Delete chord", progression.size() > 1);
     return m;
+}
+
+bool ChordStrip::applyMenuResult (BacklineProcessor& p, const Progression& shown, int index, int result,
+                                  const std::vector<Chord>& choices)
+{
+    return p.getProgression() == shown && applyMenuResult (p, index, result, choices);
 }
 
 bool ChordStrip::applyMenuResult (BacklineProcessor& p, int index, int result, const std::vector<Chord>& choices)
@@ -957,7 +1033,8 @@ PartTile::PartTile (BacklineProcessor& p, BacklineProcessor::Part whichPart, juc
 void PartTile::resized()
 {
     rhythm.setBounds (getWidth() - 152, 12, 138, 28);
-    instrument.setBounds (getWidth() - 14 - 112, getHeight() - 12 - 26, 112, 26);
+    const int x = 14 + 66 + 6 + 62 + 6; // after the MIDI and WAV chips, with the same gap as between them
+    instrument.setBounds (x, getHeight() - 12 - 26, getWidth() - 14 - x, 26);
 }
 
 void PartTile::update()
@@ -1024,14 +1101,16 @@ void PartTile::paint (juce::Graphics& g)
             const auto chip = chipBounds (c).toFloat();
             if (chip.isEmpty())
                 continue;
-            const bool hot = hoverChip == c;
-            g.setColour (control);
+            // The WAV is not offered while the part's instrument is still loading.
+            const float alpha = c == wav && processor.isInstrumentLoading (part) ? 0.45f : 1.0f;
+            const bool hot = hoverChip == c && alpha > 0.5f;
+            g.setColour (control.withMultipliedAlpha (alpha));
             g.fillRoundedRectangle (chip.reduced (0.5f), 8.0f);
-            g.setColour (hot ? accent : border);
+            g.setColour ((hot ? accent : border).withMultipliedAlpha (alpha));
             g.drawRoundedRectangle (chip.reduced (0.5f), 8.0f, 1.0f);
-            g.setColour (hot ? text : textDim);
+            g.setColour ((hot ? text : textDim).withMultipliedAlpha (alpha));
             drawGrip (g, chip.getX() + 10.0f, chip.getCentreY() - 6.0f);
-            g.setColour (text);
+            g.setColour (text.withMultipliedAlpha (alpha));
             g.setFont (bodyBold (12.0f));
             g.drawText (c == midi ? "MIDI" : "WAV", chip.withTrimmedLeft (22.0f).withTrimmedRight (8.0f).toNearestInt(),
                         juce::Justification::centred, false);
@@ -1082,11 +1161,16 @@ void PartTile::paint (juce::Graphics& g)
 void PartTile::mouseMove (const juce::MouseEvent& e)
 {
     const int chip = chipAt (e.getPosition());
+    const juce::String tip = chip == midi ? juce::String ("Drag the MIDI into your DAW")
+                           : chip != wav ? juce::String()
+                           : processor.isInstrumentLoading (part) ? "Loading " + processor.getInstrument (part) + ellipsis
+                                                                  : juce::String ("Drag the audio (WAV) into your DAW");
+    if (tip != getTooltip())
+        setTooltip (tip);
     if (chip != hoverChip || ! hover)
     {
         hoverChip = chip;
         hover = true;
-        setTooltip (chip == midi ? "Drag the MIDI into your DAW" : chip == wav ? "Drag the audio (WAV) into your DAW" : "");
         repaint();
     }
 }
@@ -1137,7 +1221,15 @@ BacklineEditor::BacklineEditor (BacklineProcessor& p)
 
     playButton.setTooltip ("Play or stop");
     playButton.onClick = [this] { processor.setTransportPlaying (! processor.isTransportPlaying()); refresh(); };
-    tempoField.onCommit = [this] (double bpm) { processor.setManualTempo (bpm); refresh(); };
+    tempoField.onCommit = [this] (double bpm)
+    {
+        // Return, a click elsewhere, or a drag or wheel that ends where it began commit the tempo
+        // already in use: that must not re-analyse the take. Compared as shown (the estimate can
+        // be 97.43 while the field shows 97.4).
+        if (TempoField::format (bpm) != TempoField::format (processor.getManualTempo()))
+            processor.setManualTempo (bpm);
+        refresh();
+    };
 
     for (int i = 0; i < 12; ++i) tonicBox.addItem (pitchClassName (i), i + 1); // relabelled per mode in refresh()
     modeBox.addItemList ({ "major", "minor" }, 1);

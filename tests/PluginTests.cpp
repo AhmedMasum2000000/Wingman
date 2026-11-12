@@ -617,6 +617,74 @@ static void versionTwoTests()
         CHECK (rig.processor.getTakeName() == "Recorded take" && rig.processor.isTakePlaybackOn());
     }
 
+    // Committing the tempo the take is analysed at (Return in the tempo field, a click elsewhere)
+    // changes nothing. A real tempo change re-analyses but keeps the chords the user has edited.
+    {
+        Rig rig;
+        rig.head.musical = false;
+        rig.run (0.05, false);
+        rig.processor.loadAudioFile (writeWav (folder.getChildFile ("edits.wav"), chordAudio (19.2, 44100.0, 100.0, true, 0.15f), 44100.0));
+        CHECK (waitFor ([&] { return ! rig.processor.isLoadingFile(); }));
+        CHECK (rig.processor.getNumIdeas() > 1);
+        rig.processor.selectIdea (1);
+        CHECK (rig.processor.splitChord (0));
+        CHECK (rig.processor.setChord (2, { 2, backline::Quality::Minor7 }));
+        const auto edited = rig.processor.getProgression();
+        const double tempo = rig.processor.getManualTempo();
+        const int revision = rig.processor.getRevision();
+
+        rig.processor.setManualTempo (tempo);
+        CHECK (! rig.processor.isAnalysing() && rig.processor.getRevision() == revision);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+        CHECK (rig.processor.getProgression() == edited && rig.processor.getSelectedIdea() == 1);
+
+        rig.processor.setManualTempo (tempo * 1.25);
+        CHECK (rig.processor.isAnalysing());
+        CHECK (waitFor ([&] { return ! rig.processor.isAnalysing(); }));
+        std::printf ("after a tempo change: %s(%.2f BPM, %.1f beats in the take)\n", chordNames (rig.processor).toRawUTF8(),
+                     rig.processor.getBpm(), rig.processor.getTakeBeats());
+        CHECK (std::abs (rig.processor.getBpm() - tempo * 1.25) < 1.0e-9 && std::abs (rig.processor.getTakeBeats() - 40.0) < 0.1);
+        CHECK (rig.processor.getProgression() == edited && rig.processor.getSelectedIdea() == 1);
+        CHECK (rig.processor.getNumIdeas() > 1 && rig.processor.hasCapture());
+
+        // Picking an idea puts fresh chords in place, and those follow the next tempo change.
+        rig.processor.selectIdea (0);
+        const auto idea = rig.processor.getProgression();
+        rig.processor.setManualTempo (tempo);
+        CHECK (waitFor ([&] { return ! rig.processor.isAnalysing(); }));
+        CHECK (rig.processor.getProgression() != idea && std::abs (rig.processor.getLoopBeats() - 32.0) < 1.0e-9);
+        CHECK (rig.processor.getSelectedIdea() == 0);
+    }
+
+    // A passing dominant (or any 7th chord picked by hand) survives turning Sevenths on and off,
+    // also across a session save and restore; so does the sharp spelling of a passing chord.
+    {
+        BacklineProcessor p;
+        loadLegacySession (p, "0M 5M");
+        CHECK (p.insertPassingChord (0) && chordNames (p) == "C C7 F ");
+        p.setSevenths (true);
+        CHECK (chordNames (p) == "Cmaj7 C7 Fmaj7 ");
+        p.setSevenths (false);
+        CHECK (chordNames (p) == "C C7 F ");
+        p.setSevenths (true);
+        CHECK (p.setChord (2, { 9, backline::Quality::Minor7 })); // picked from the menu while Sevenths is on
+        juce::MemoryBlock state;
+        p.getStateInformation (state);
+        BacklineProcessor restored;
+        restored.setStateInformation (state.getData(), (int) state.getSize());
+        CHECK (restored.getSevenths() && chordNames (restored) == "Cmaj7 C7 Am7 ");
+        restored.setSevenths (false);
+        CHECK (chordNames (restored) == "C C7 Am7 ");
+
+        BacklineProcessor inF;
+        loadLegacySession (inF, "5M 7m", 5);
+        CHECK (inF.insertPassingChord (0));
+        CHECK (backline::chordName (inF.getChords()[1], inF.getKey()) == "F#dim");
+        inF.getStateInformation (state);
+        restored.setStateInformation (state.getData(), (int) state.getSize());
+        CHECK (backline::chordName (restored.getChords()[1], restored.getKey()) == "F#dim");
+    }
+
     // Take playback is locked to the loop: an impulse at beat 5 of a 44.1 kHz file comes out exactly
     // at beat 5 of the 48 kHz output, in every pass, and the loop point does not click.
     {
@@ -794,9 +862,11 @@ static void versionTwoTests()
     {
         Rig rig;
         rig.run (0.05, false);
+        rig.processor.setExportFolder (folder.getChildFile ("Exports"));
         loadLegacySession (rig.processor, "0M 7M 9m 5M");
         rig.processor.setBassRhythm (backline::BassRhythm::Sustain);
         const auto file = rig.processor.writeWavFile (Part::Bass);
+        CHECK (file.getParentDirectory() == folder.getChildFile ("Exports") && file.getFileName().startsWith ("Backline Bass "));
         juce::AudioFormatManager formats;
         formats.registerBasicFormats();
         std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
@@ -821,7 +891,25 @@ static void versionTwoTests()
         const auto chords = rig.processor.renderPartAudio (Part::Chords, 44100.0);
         CHECK (chords.getNumSamples() >= 16 * 22050 && chords.getMagnitude (0, chords.getNumSamples()) > 0.05f);
         CHECK (rig.processor.writeWavFile (Part::Melody) == juce::File());
-        file.deleteFile();
+
+        // A DAW keeps referring to a dropped WAV, so a later export never overwrites it: a changed
+        // part goes to a new file and the first stays as it was. The same audio again is the same file.
+        const auto firstSize = file.getSize();
+        const auto firstTime = file.getLastModificationTime();
+        CHECK (rig.processor.writeWavFile (Part::Bass) == file);
+        CHECK (rig.processor.setChord (0, { 2, backline::Quality::Minor }));
+        const auto second = rig.processor.writeWavFile (Part::Bass);
+        std::printf ("WAV exports: %s, %s\n", file.getFileName().toRawUTF8(), second.getFileName().toRawUTF8());
+        CHECK (second.existsAsFile() && second != file && file.existsAsFile());
+        CHECK (file.getSize() == firstSize && file.getLastModificationTime() == firstTime);
+        CHECK (rig.processor.writeWavFile (Part::Bass) == second);
+        CHECK (rig.processor.setChord (0, { 0, backline::Quality::Major }));
+        const auto third = rig.processor.writeWavFile (Part::Bass); // the first audio again, but that file may be in use
+        CHECK (third.existsAsFile() && third != file && third != second && third.getSize() == firstSize);
+        const auto chordsFile = rig.processor.writeWavFile (Part::Chords);
+        CHECK (chordsFile.getFileName().startsWith ("Backline Chords ") && chordsFile != third);
+        for (const auto& f : { file, second, third, chordsFile })
+            f.deleteFile();
     }
 
     // Sample instruments from a folder of generated sine samples.
@@ -898,6 +986,47 @@ static void versionTwoTests()
         const auto live = rig.run (8.0, false);
         // The chord synth plays too, but in a higher range; check just the bass notes.
         checkPitches (live, 0.0, "sampled bass (live)");
+        rig.head.playing = false;
+        rig.run (0.5, false);
+
+        // While an instrument loads, its part offers no WAV (the synth would play it instead).
+        rig.processor.setExportFolder (folder.getChildFile ("Exports"));
+        rig.processor.setInstrument (Part::Chords, "Sines");
+        CHECK (rig.processor.isInstrumentLoading (Part::Chords) && ! rig.processor.isInstrumentLoading (Part::Bass));
+        CHECK (rig.processor.writeWavFile (Part::Chords) == juce::File());
+        const auto bassWav = rig.processor.writeWavFile (Part::Bass);
+        CHECK (bassWav.existsAsFile());
+        CHECK (waitFor ([&] { return ! rig.processor.isInstrumentLoading(); }));
+        CHECK (! rig.processor.isInstrumentLoading (Part::Chords) && rig.processor.getLoadedInstrument (Part::Chords) == "Sines");
+        const auto chordsWav = rig.processor.writeWavFile (Part::Chords);
+        CHECK (chordsWav.existsAsFile());
+        bassWav.deleteFile();
+        chordsWav.deleteFile();
+        // Asking for what is already playing loads nothing.
+        rig.processor.setInstrument (Part::Chords, "Sines");
+        CHECK (! rig.processor.isInstrumentLoading());
+        rig.processor.setInstrument (Part::Chords, instruments::builtInName);
+        CHECK (rig.processor.getLoadedInstrument (Part::Chords) == instruments::builtInName);
+
+        // Changing the instrument while notes sound crossfades: no step in the output. Sustained
+        // bass notes from the sampled sines, then the synth takes over in the middle of a note.
+        rig.processor.setChordRhythm (backline::ChordRhythm::Sustain);
+        rig.head.playing = true;
+        rig.pos = 0;
+        rig.run (1.0, false);
+        const auto steady = rig.run (0.2, false);
+        rig.processor.setInstrument (Part::Bass, instruments::builtInName);
+        const auto change = rig.run (0.2, false);
+        const float normal = largestStep (steady, 0, steady.size()), atChange = largestStep (change, 0, change.size());
+        std::printf ("instrument change while playing: largest step %.4f (before %.4f)\n", atChange, normal);
+        CHECK (atChange < 2.0f * normal + 0.002f);
+        // The same instrument again (a session restore does that) changes nothing.
+        juce::MemoryBlock session;
+        rig.processor.getStateInformation (session);
+        rig.processor.setStateInformation (session.getData(), (int) session.getSize());
+        CHECK (! rig.processor.isInstrumentLoading());
+        rig.processor.setInstrument (Part::Bass, "Sines");
+        CHECK (waitFor ([&] { return ! rig.processor.isInstrumentLoading(); }));
         rig.head.playing = false;
         rig.run (0.5, false);
 
@@ -1001,6 +1130,40 @@ static void editorTests()
         // Empty: nothing to lay out, and no division by zero either.
         l = ui::StripLayout::make ({}, 4.0, 800.0f, 160.0f);
         CHECK (l.rows == 1 && std::abs (l.beatAt ({ 400.0f, 80.0f })) < 1.0e-9);
+
+        // A one-beat passing chord among long ones is a few pixels wide; its middle is still the
+        // card (it opens its menu), and its edges can still be dragged.
+        std::vector<Chord> sixteenBars ((size_t) 16, Chord { 0 });
+        for (size_t i = 0; i < sixteenBars.size(); ++i) sixteenBars[i].root = (int) (i * 7) % 12;
+        for (double beats : { 8.0, 4.0 })
+        {
+            const auto narrow = backline::insertPassingChord (backline::toProgression (sixteenBars, beats), 3, { 0, false, 1.0f });
+            l = ui::StripLayout::make (narrow, 4.0, 852.0f, 164.0f);
+            p = l.pieces (narrow[4].start, narrow[4].length);
+            CHECK (narrow[4].length == 1.0 && p.size() == 1);
+            const auto centre = p[0].getCentre();
+            std::printf ("passing card at %.0f beats a chord: %.1f px wide\n", beats, p[0].getWidth());
+            CHECK (l.boundaryAt (narrow, centre, 5.0f) < 0);
+            for (size_t i = 0; i < narrow.size(); ++i)
+                for (const auto& piece : l.pieces (narrow[i].start, narrow[i].length))
+                    CHECK (piece.contains (centre) == (i == 4));
+            CHECK (l.boundaryAt (narrow, { p[0].getX(), centre.y }, 5.0f) == 3);
+            CHECK (l.boundaryAt (narrow, { p[0].getRight(), centre.y }, 5.0f) == 4);
+            CHECK (l.boundaryAt (narrow, { p[0].getX() - 4.0f, centre.y }, 5.0f) == 3); // from the wide card's side: the full 5 px
+        }
+    }
+
+    // What the bass note of a slash chord is called in the menu.
+    {
+        CHECK (ui::bassNoteLabel ({ 0, Quality::Major, 4 }) == "Third in the bass");
+        CHECK (ui::bassNoteLabel ({ 0, Quality::Major, 7 }) == "Fifth in the bass");
+        CHECK (ui::bassNoteLabel ({ 0, Quality::Sus4, 5 }) == "Fourth in the bass");
+        CHECK (ui::bassNoteLabel ({ 0, Quality::Sus2, 2 }) == "Second in the bass");
+        CHECK (ui::bassNoteLabel ({ 9, Quality::Minor, 0 }) == "Third in the bass");
+        CHECK (ui::bassNoteLabel ({ 11, Quality::Diminished, 5 }) == "Fifth in the bass");
+        CHECK (ui::bassNoteLabel ({ 9, Quality::Minor7, 7 }) == "Seventh in the bass");
+        CHECK (ui::bassNoteLabel ({ 2, Quality::Major }) == "Root in the bass");
+        CHECK (ui::bassNoteLabel ({ 0, Quality::Major, 1 }).isEmpty());
     }
 
     // The editor in a DAW, after a take: no own transport controls; the card menu and its edits;
@@ -1087,6 +1250,30 @@ static void editorTests()
         // A click on a card is not a drag: nothing moves.
         CHECK (strip.chordAt ({ 20.0f, 80.0f }) == 0);
 
+        // The progression is replaced while a menu is open or a boundary is being dragged (a new
+        // take, a tempo change): the menu's choice and the drag no longer apply to anything.
+        rig.processor.selectIdea (0);
+        const auto shown = rig.processor.getProgression();
+        menu = strip.buildMenu (0);
+        rig.processor.selectIdea (1);
+        const auto replaced = rig.processor.getProgression();
+        CHECK (replaced != shown);
+        CHECK (! ui::ChordStrip::applyMenuResult (rig.processor, shown, 0, ui::ChordStrip::deleteId, menu.choices));
+        CHECK (! ui::ChordStrip::applyMenuResult (rig.processor, shown, 0, 1, menu.choices));
+        CHECK (rig.processor.getProgression() == replaced);
+        CHECK (ui::ChordStrip::applyMenuResult (rig.processor, replaced, 0, ui::ChordStrip::splitId, menu.choices)); // still current: applied
+        rig.processor.selectIdea (0);
+        l = strip.layout();
+        const auto grab = l.boundaryLine (shown[0].start + shown[0].length);
+        const juce::Point<float> at (grab.getStartX(), grab.getStartY() + 40.0f);
+        strip.mouseDown (mouseAt (strip, at, at, false));
+        rig.processor.selectIdea (1);
+        strip.mouseDrag (mouseAt (strip, at.translated ((float) (l.width / l.beatsPerRow) * 2.0f, 0.0f), at, true));
+        strip.mouseDrag (mouseAt (strip, at.translated ((float) (l.width / l.beatsPerRow) * 3.0f, 0.0f), at, true));
+        strip.mouseUp (mouseAt (strip, at, at, true));
+        CHECK (rig.processor.getProgression() == replaced);
+        rig.processor.selectIdea (0);
+
         // The tiles: Chords and Bass offer MIDI and WAV, Audio to MIDI only MIDI.
         auto tiles = childrenOfType<ui::PartTile> (editor);
         CHECK (tiles.size() == 3);
@@ -1099,6 +1286,10 @@ static void editorTests()
             CHECK (tiles[0]->chipAt (wavChip.getCentre()) == ui::PartTile::wav);
             CHECK (! tiles[0]->chipBounds (ui::PartTile::midi).intersects (wavChip));
             CHECK (! wavChip.intersects (tiles[0]->instrument.getBounds()));
+            // The same 6 px between the WAV chip and the instrument as between the two chips.
+            CHECK (wavChip.getX() - tiles[0]->chipBounds (ui::PartTile::midi).getRight() == 6);
+            CHECK (tiles[0]->instrument.getX() - wavChip.getRight() == 6);
+            CHECK (tiles[0]->instrument.getRight() == tiles[0]->getWidth() - 14);
         }
 
         // Audio files dropped on the window become the take; other files are ignored.
@@ -1176,6 +1367,69 @@ static void editorTests()
             buttons.front()->triggerClick();
             juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
             CHECK (rig.processor.isTransportPlaying() != wasPlaying);
+
+            // A take, edited chords, and a tempo that is not a whole number (97.43, shown as 97.4).
+            const auto folder = testFolder().getChildFile ("tempo-ui");
+            folder.createDirectory();
+            rig.processor.loadAudioFile (writeWav (folder.getChildFile ("take.wav"), chordAudio (19.2, 44100.0, 100.0, true, 0.15f), 44100.0));
+            CHECK (waitFor ([&] { return ! rig.processor.isLoadingFile(); }));
+            rig.processor.setManualTempo (97.43);
+            CHECK (waitFor ([&] { return ! rig.processor.isAnalysing(); }));
+            rig.processor.selectIdea (1);
+            CHECK (rig.processor.splitChord (1) && rig.processor.setChord (0, { 4, Quality::Minor7 }));
+            const auto edited = rig.processor.getProgression();
+            editor.refresh();
+            CHECK (ui::TempoField::format (field.getShownTempo()) == "97.4");
+            auto unchanged = [&]
+            {
+                return ! rig.processor.isAnalysing() && std::abs (rig.processor.getManualTempo() - 97.43) < 1.0e-9
+                    && rig.processor.getProgression() == edited && rig.processor.getSelectedIdea() == 1;
+            };
+
+            // Click to type, then Return (or a click elsewhere) without changing the value.
+            field.showEditor();
+            auto typing = childrenOfType<juce::TextEditor> (field);
+            CHECK (typing.size() == 1 && typing.front()->getText() == "97.4");
+            if (typing.size() == 1)
+                typing.front()->onReturnKey();
+            CHECK (unchanged());
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100); // the text editor goes
+            field.showEditor();
+            typing = childrenOfType<juce::TextEditor> (field);
+            if (typing.size() == 1)
+                typing.front()->onFocusLost();
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+            CHECK (unchanged());
+            // A drag that ends where it began.
+            field.mouseDown (mouseAt (field, down, down, false));
+            field.mouseDrag (mouseAt (field, down.translated (0.0f, -20.0f), down, true));
+            field.mouseDrag (mouseAt (field, down, down, true));
+            field.mouseUp (mouseAt (field, down, down, true));
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+            CHECK (unchanged());
+            // The wheel turned one step up and one back.
+            juce::MouseWheelDetails wheel {};
+            wheel.deltaY = 0.2f;
+            field.mouseWheelMove (mouseAt (field, down, down, false), wheel);
+            CHECK (ui::TempoField::format (field.getShownTempo()) == "98");
+            wheel.deltaY = -0.2f;
+            field.mouseWheelMove (mouseAt (field, down, down, false), wheel);
+            CHECK (ui::TempoField::format (field.getShownTempo()) == "97.4");
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (700);
+            CHECK (! field.isEditing() && unchanged());
+
+            // A real change still applies, and the edited chords stay.
+            field.showEditor();
+            typing = childrenOfType<juce::TextEditor> (field);
+            if (typing.size() == 1)
+            {
+                typing.front()->setText ("112", false);
+                typing.front()->onReturnKey();
+            }
+            CHECK (std::abs (rig.processor.getManualTempo() - 112.0) < 1.0e-9 && rig.processor.isAnalysing());
+            CHECK (waitFor ([&] { return ! rig.processor.isAnalysing(); }));
+            CHECK (rig.processor.getProgression() == edited && std::abs (rig.processor.getBpm() - 112.0) < 1.0e-9);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
         }
         // Once a host transport appears, they are hidden.
         rig.head.musical = true;

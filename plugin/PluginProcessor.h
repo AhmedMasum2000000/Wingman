@@ -72,7 +72,9 @@ public:
     double getTempo() const;                                   // the tempo in use (host or manual)
     double getManualTempo() const { return manualBpm.load(); }
     // 20-300 BPM. Without a host transport this re-analyses the take at the new tempo
-    // (asynchronously; the ideas are rebuilt). With one, the value is only stored.
+    // (asynchronously; the ideas are rebuilt, and a progression the user has edited is kept).
+    // The tempo the take is already analysed at changes nothing. With a host transport the value
+    // is only stored.
     void setManualTempo (double bpm);
     double getEstimatedTempo() const { const juce::ScopedLock lock (stateLock); return estimatedBpm; } // for the loaded file, 0 if none
     bool isTransportPlaying() const { return transportPlaying.load(); }
@@ -131,8 +133,9 @@ public:
     std::vector<backline::Chord> getVariations (int index) const;
 
     // Sevenths: turning it on gives every major/minor triad its diatonic 7th (V becomes V7...);
-    // turning it off turns 7th chords back into triads. The progression holds what is heard, so
-    // a chord picked from a menu is played exactly as picked. New ideas follow the setting.
+    // turning it off takes back the 7ths it added. The progression holds what is heard, so a chord
+    // picked from a menu or inserted as a passing chord is played exactly as picked, and stays so
+    // when the setting is turned off. New ideas follow the setting.
     bool getSevenths() const { const juce::ScopedLock lock (stateLock); return sevenths; }
     void setSevenths (bool on);
 
@@ -146,20 +149,28 @@ public:
     juce::StringArray getInstrumentNames();
     juce::String getInstrument (Part part) const;        // the one selected (saved with the session)
     juce::String getLoadedInstrument (Part part) const;  // the one sounding: the synth while loading or on fallback
-    void setInstrument (Part part, const juce::String& name); // loads asynchronously; Melody is ignored
+    // Loads asynchronously; Melody is ignored. Asking for the instrument already playing (or on its
+    // way) changes nothing; a real change crossfades from the old sound to the new one.
+    void setInstrument (Part part, const juce::String& name);
     bool isInstrumentLoading() const { return pendingInstrumentLoads.load() > 0; }
+    bool isInstrumentLoading (Part part) const;          // the part's selected instrument is still being loaded
     juce::File getSoundsFolder() const { const juce::ScopedLock lock (stateLock); return soundsFolder; }
     void setSoundsFolder (const juce::File& folder);     // defaults to instruments::defaultSoundsFolder()
 
     //==========================================================================
-    // Export. Files go to a temporary folder unique to this plugin instance and are overwritten
-    // by the next export of the same part; they are made for drag and drop. An empty File means
-    // there was nothing to export.
+    // Export, made for drag and drop. An empty File means there was nothing to export.
+    // MIDI goes to a temporary folder unique to this plugin instance and is overwritten by the next
+    // export of the same part (DAWs import MIDI as data).
     juce::File writeMidiFile (Part part);
     // Chords or Bass as a 24-bit stereo WAV: one loop at the current tempo plus the release tail,
-    // played by the part's instrument, at the device sample rate. Renders on the calling thread
-    // (never the audio thread); typically well under a second.
+    // played by the part's instrument, at the device sample rate. DAWs keep dropped audio where it
+    // is, so every export is a new file in getExportFolder(), named after the part and the time,
+    // and never overwritten; exporting the same unchanged audio again hands out the same file.
+    // Nothing (an empty File) while the part's instrument is still loading. Renders on the
+    // calling thread (never the audio thread); typically well under a second.
     juce::File writeWavFile (Part part);
+    juce::File getExportFolder() const { const juce::ScopedLock lock (stateLock); return exportFolder; }
+    void setExportFolder (const juce::File& folder);     // defaults to <Music>/Backline/Exports
     juce::AudioBuffer<float> renderPartAudio (Part part, double sampleRate) const; // what writeWavFile writes
     std::vector<backline::Note> getPartNotes (Part part) const;
 
@@ -222,7 +233,7 @@ private:
     void timerCallback() override;
     void analyseCapture();
     void installAnalysis (Analysis&& analysis, bool newTake, bool fromHostRecording);
-    void rebuildIdeas();
+    void rebuildIdeas (bool keepProgression = false);
     void updatePlayback();
     void haltPreviewAndTake();
     void requestReanalysis();
@@ -261,12 +272,22 @@ private:
     std::vector<backline::Note> melodyNotes;
     int selectedIdea = 0;
     bool lastTakeTooShort = false, sevenths = false;
+    bool progressionEdited = false; // changed by the user since an idea was last put in place
     backline::ChordRhythm chordRhythm = backline::ChordRhythm::Sustain;
     backline::BassRhythm bassRhythm = backline::BassRhythm::Eighths;
     juce::String loadError;
-    juce::File soundsFolder;
+    juce::File soundsFolder, exportFolder;
     juce::String requestedInstrument[2];
+    juce::String loadingInstrument[2];  // the instrument being loaded for each part, empty when none
     instruments::InstrumentPtr loadedInstrument[2];
+    struct WavExport
+    {
+        juce::File file;
+        juce::uint64 hash = 0;
+        juce::int64 size = 0;
+        juce::Time modified;
+    };
+    WavExport lastWav[2];               // the last WAV handed out for each part
     int loadTicket = 0, analysisTicket = 0, instrumentTicket[2] = { 0, 0 };
     std::atomic<int> revision { 0 };
     std::atomic<double> playheadBeats { -1.0 };
@@ -282,11 +303,13 @@ private:
     std::unique_ptr<juce::Synthesiser> pendingSynth[2], releasedSynth[2];  // guarded by playbackLock
     std::shared_ptr<const Playback> activePlayback;                        // audio thread
     std::unique_ptr<juce::Synthesiser> activeSynth[2];                     // audio thread (chords, bass)
+    std::unique_ptr<juce::Synthesiser> fadingSynth[2];                     // audio thread: the instrument just replaced, fading out
+    int fadeSamplesLeft[2] = { 0, 0 }, fadeSamples[2] = { 1, 1 };          // audio thread
     bool wasPlaying = false, takeWasPlaying = false, takeSwapWaiting = false;
     double nextBeat = -1.0, takeNextBeat = -1.0; // where the last block ended, -1 after any interruption
     TakeReader takeMain, takeTail;               // the loop being played, and a fading-out continuation
-    juce::MidiBuffer chordMidi, bassMidi;
-    juce::AudioBuffer<float> synthBuffer;
+    juce::MidiBuffer chordMidi, bassMidi, noMidi;
+    juce::AudioBuffer<float> synthBuffer, fadeBuffer;
 
     juce::ThreadPool worker { 1 }; // last, so it is stopped before anything its jobs touch is destroyed
 
