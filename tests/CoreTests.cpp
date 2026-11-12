@@ -186,6 +186,42 @@ static std::vector<float> drumLoop (double rate, double seconds, double bpm)
     return out;
 }
 
+// A 3/4 drum loop: a kick on the first beat of each bar, a hat on the other two.
+static std::vector<float> waltzLoop (double rate, double seconds, double bpm)
+{
+    std::vector<float> out ((size_t) (rate * seconds));
+    uint32_t state = 2u;
+    int index = 0;
+    for (double t = 0.02; t < seconds; t += 60.0 / bpm, ++index)
+    {
+        if (index % 3 == 0)
+            addKick (out, rate, t, 0.5f);
+        else
+            addClick (out, rate, t, 0.02, 0.2f, state);
+    }
+    return out;
+}
+
+// Starts of the notes of a part, each once, in order.
+static std::vector<double> noteStarts (const std::vector<Note>& notes)
+{
+    std::vector<double> s;
+    for (const auto& n : notes)
+        if (s.empty() || s.back() != n.start) s.push_back (n.start);
+    return s;
+}
+
+// No pitch is struck again before its previous note has ended (MIDI cannot hold the same note twice).
+static bool noOverlaps (const std::vector<Note>& notes)
+{
+    for (size_t a = 0; a < notes.size(); ++a)
+        for (size_t b = 0; b < notes.size(); ++b)
+            if (a != b && notes[a].pitch == notes[b].pitch && notes[b].start >= notes[a].start
+                && notes[b].start < notes[a].start + notes[a].length - 1e-9)
+                return false;
+    return true;
+}
+
 int main()
 {
     const double bpm = 120.0, barSeconds = 2.0;
@@ -576,6 +612,26 @@ int main()
         CHECK (chordName (passingChord (Dm, Am, aMinor), aMinor) == "E7");
         CHECK (chordName (passingChord (Am, C, aMinor), aMinor) == "G7");     // no triad on B in the key
 
+        // Leading-note diminished chords lead up, so they are spelled with a sharp in flat keys too.
+        const Key fMajor { 5, false, 1.0f }, bbMajor { 10, false, 1.0f }, ebMajor { 3, false, 1.0f }, dMinor { 2, true, 1.0f };
+        const Chord Gm { 7, Quality::Minor }, Bb { 10, Quality::Major }, Eb { 3, Quality::Major }, A { 9, Quality::Major };
+        CHECK (chordName (passingChord (F, Gm, fMajor), fMajor) == "F#dim");
+        CHECK (chordName (passingChord (Gm, Am, fMajor), fMajor) == "G#dim");
+        CHECK (chordName (passingChord ({ 0, Quality::Major }, Dm, fMajor), fMajor) == "C#dim");
+        CHECK (chordName (passingChord (F, Gm, bbMajor), bbMajor) == "F#dim");
+        CHECK (chordName (passingChord (F, Gm, ebMajor), ebMajor) == "F#dim");
+        CHECK (chordName (passingChord (Gm, Am, dMinor), dMinor) == "G#dim");
+        CHECK (chordName (passingChord (C, Dm, cMajor), cMajor) == "C#dim");
+        CHECK (chordName (passingChord (Bb, C, fMajor), fMajor) == "Bdim");      // a scale note keeps the key's spelling
+        CHECK (chordName (passingChord (Eb, F, bbMajor), bbMajor) == "Edim");
+        CHECK (chordName (passingChord ({ 0, Quality::Dominant7 }, F, fMajor), fMajor) == "Edim"); // already on the dominant
+        CHECK (chordName (passingChord (A, Bb, fMajor), fMajor) == "F7");         // not a diminished chord: no hint
+        CHECK (chordName (passingChord (F, Gm, fMajor)) == "F#dim");             // the neutral spelling agrees
+        CHECK (chordName (Chord { 6, Quality::Diminished }, fMajor) == "Gbdim");  // without the hint, the key decides
+        // The hint is only spelling: the chord is the same chord, and its variations are spelled alike.
+        CHECK (passingChord (F, Gm, fMajor) == (Chord { 6, Quality::Diminished }));
+        CHECK (chordName (chordVariations (passingChord (F, Gm, fMajor), fMajor).front(), fMajor) == "F#");
+
         // Whatever the two chords and the key, the passing chord is a third chord that leads on:
         // it is a dominant or diminished chord resolving to the target, or it belongs to the key.
         for (int tonic = 0; tonic < 12; ++tonic)
@@ -753,6 +809,33 @@ int main()
         CHECK (triadChord ({ 9, Quality::Minor7, 0 }) == (Chord { 9, Quality::Minor, 0 }));   // Am7/C stays Am/C
         CHECK (triadChord ({ 0, Quality::Major7 }) == (Chord { 0, Quality::Major }));
         CHECK (triadChord ({ 0, Quality::Sus4 }) == (Chord { 0, Quality::Sus4 }));
+
+        // Only the 7ths the colouring added are taken back. A passing dominant stays a dominant...
+        const Chord C { 0, Quality::Major }, F { 5, Quality::Major }, G { 7, Quality::Major }, Am { 9, Quality::Minor };
+        const auto withPass = insertPassingChord (toProgression ({ C, F }, 4.0), 0, cMajor);
+        CHECK (describe (withPass, cMajor) == "C C7 F " && ! withPass[1].coloured);
+        CHECK (describe (withSevenths (withPass, cMajor), cMajor) == "Cmaj7 C7 Fmaj7 ");
+        CHECK (describe (withoutSevenths (withSevenths (withPass, cMajor)), cMajor) == "C C7 F ");
+        CHECK (withoutSevenths (withSevenths (withPass, cMajor)) == withPass);
+        // ...and so does a 7th chord the user picked, before or while the colouring is on.
+        const auto picked = setChord (toProgression ({ C, Am, F, G }, 4.0), 1, { 9, Quality::Minor7 });
+        CHECK (describe (withSevenths (picked, cMajor), cMajor) == "Cmaj7 Am7 Fmaj7 G7 ");
+        CHECK (describe (withoutSevenths (withSevenths (picked, cMajor)), cMajor) == "C Am7 F G ");
+        auto on = withSevenths (toProgression ({ C, Am, F, G }, 4.0), cMajor);
+        CHECK (on[1].coloured && on[3].coloured);
+        on = setChord (on, 3, { 7, Quality::Dominant7, 11 });                   // G7/B, picked from the menu
+        CHECK (! on[3].coloured && describe (withoutSevenths (on), cMajor) == "C Am F G7/B ");
+        // Splitting, moving, deleting and inserting keep the marks of the chords they move.
+        on = withSevenths (toProgression ({ C, Am, F, G }, 4.0), cMajor);
+        on = splitChord (on, 0, 1.0);
+        on = moveBoundary (on, 2, 9.0, 1.0);
+        on = deleteChord (on, 3);
+        on = insertPassingChord (on, 2, cMajor);
+        std::printf ("coloured, edited: %s\n", describe (on, cMajor).c_str());
+        CHECK (describe (on, cMajor) == "Cmaj7 Cmaj7 Am7 D7 G7 ");
+        CHECK (describe (withoutSevenths (on), cMajor) == "C C Am D7 G ");
+        CHECK (on[3].start == 11.0 && on[3].length == 1.0 && on[2].start == 4.0 && on[2].length == 7.0);
+        CHECK (withSevenths (withSevenths (on, cMajor), cMajor) == withSevenths (on, cMajor));
     }
 
     // 16. Voicings and bass for every quality, inversion and rhythm.
@@ -842,7 +925,8 @@ int main()
         bass = renderBass (p, BassRhythm::Octaves);
         CHECK (bass[8].pitch == 40 && bass[9].pitch == 52 && bass[8].start == 4.0 && bass[9].start == 4.5);
 
-        // Chords of different lengths: the rhythm starts again with each chord.
+        // Chords of different lengths: the rhythm starts again with each chord (the dotted figure
+        // follows the bar lines instead, and strikes a chord that starts between its hits).
         const Progression uneven { { { 0, Quality::Major }, 0.0, 3.0 }, { { 9, Quality::Minor }, 3.0, 1.0 }, { { 5, Quality::Major }, 4.0, 0.5 },
                                    { { 7, Quality::Major }, 4.5, 3.5 } };
         auto starts = [] (const std::vector<Note>& notes)
@@ -856,10 +940,33 @@ int main()
         CHECK (starts (renderChords (uneven, ChordRhythm::Quarters)) == (std::vector<double> { 0.0, 1.0, 2.0, 3.0, 4.0, 4.5, 5.5, 6.5, 7.5 }));
         // The half-beat chord has no offbeat of its own, so it is played on its start.
         CHECK (starts (renderChords (uneven, ChordRhythm::Offbeat)) == (std::vector<double> { 0.5, 1.5, 2.5, 3.5, 4.0, 5.0, 6.0, 7.0 }));
-        CHECK (starts (renderChords (uneven, ChordRhythm::Dotted)) == (std::vector<double> { 0.0, 1.5, 3.0, 4.0, 4.5, 6.0, 7.5 }));
+        CHECK (starts (renderChords (uneven, ChordRhythm::Dotted)) == (std::vector<double> { 0.0, 1.5, 3.0, 4.0, 4.5, 5.5, 7.0 }));
         CHECK (starts (renderBass (uneven, BassRhythm::Offbeat)) == (std::vector<double> { 0.5, 1.5, 2.5, 3.5, 4.0, 5.0, 6.0, 7.0 }));
         CHECK (starts (renderBass (uneven, BassRhythm::Eighths)).size() == 16);
-        for (auto r : chordRhythms) CHECK (notesFollowChords (renderChords (uneven, r), uneven));
+        for (auto r : chordRhythms) CHECK (notesFollowChords (renderChords (uneven, r), uneven) && noOverlaps (renderChords (uneven, r)));
+
+        // The dotted figure keeps to the bar: in 3/4 a six-beat chord is struck on 0, 1.5, 3 and 4.5,
+        // and so is the next one from its own bar line on.
+        const Chord C { 0, Quality::Major }, G { 7, Quality::Major };
+        const Progression waltz { { C, 0.0, 6.0 }, { G, 6.0, 6.0 } };
+        CHECK (noteStarts (renderChords (Progression { { C, 0.0, 6.0 } }, ChordRhythm::Dotted, 3.0)) == (std::vector<double> { 0.0, 1.5, 3.0, 4.5 }));
+        CHECK (noteStarts (renderChords (waltz, ChordRhythm::Dotted, 3.0)) == (std::vector<double> { 0.0, 1.5, 3.0, 4.5, 6.0, 7.5, 9.0, 10.5 }));
+        // In 4/4 a chord change moved to beat 5 does not shift the second bar's figure.
+        const Progression resized { { C, 0.0, 5.0 }, { G, 5.0, 3.0 } };
+        CHECK (noteStarts (renderChords (resized, ChordRhythm::Dotted)) == (std::vector<double> { 0.0, 1.5, 3.0, 4.0, 5.0, 5.5, 7.0 }));
+        CHECK (noteStarts (renderChords (resized, ChordRhythm::Dotted, 4.0)) == noteStarts (renderChords (resized, ChordRhythm::Dotted)));
+        for (const auto* q : { &waltz, &resized })
+            for (double bar : { 2.0, 3.0, 3.5, 4.0, 5.0, 6.0 })
+            {
+                const auto notes = renderChords (*q, ChordRhythm::Dotted, bar);
+                CHECK (notesFollowChords (notes, *q) && noOverlaps (notes));
+                for (const auto& n : notes)
+                    CHECK (n.length > 0.0 && n.length <= 1.4 + 1e-9);
+            }
+        // The first hit of each chord is accented.
+        const auto accents = renderChords (resized, ChordRhythm::Dotted);
+        for (const auto& n : accents)
+            CHECK (n.velocity == ((n.start == 0.0 || n.start == 5.0) ? 100 : 86));
         for (auto r : bassRhythms)  CHECK (notesFollowChords (renderBass (uneven, r), uneven));
         CHECK (renderChords (Progression {}, ChordRhythm::Quarters).empty() && renderBass (Progression {}, BassRhythm::Eighths).empty());
 
@@ -917,6 +1024,14 @@ int main()
                 CHECK (within (found, tempo));
             }
         CHECK (within (tempoOf (drumLoop (96000.0, 12.0, 105.0), 96000.0), 105.0));
+
+        // A fast 3/4 loop is not read as one and a half of its beats (every other one between two real ones).
+        for (double tempo : { 90.0, 120.0, 140.0, 150.0, 155.0, 160.0, 170.0, 180.0 })
+        {
+            const double found = tempoOf (waltzLoop (44100.0, 16.0, tempo), 44100.0);
+            std::printf ("tempo test: 3/4 loop at %.1f BPM came out as %.2f\n", tempo, found);
+            CHECK (std::abs (found - tempo) <= tempo * 0.01);
+        }
         CHECK (within (tempoOf (drumLoop (22050.0, 12.0, 98.0), 22050.0), 98.0));
 
         // A pulse outside 70-180 comes back as its double or half, never as itself.

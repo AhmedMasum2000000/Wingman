@@ -459,6 +459,17 @@ double estimateTempo (const float* mono, size_t numSamples, double sampleRate)
 
     bestPeriod = refine (bestPeriod, step);
 
+    // A fast waltz can win as one and a half beats (two of those make its bar), which lands
+    // every other beat between two real ones. When onsets two thirds of that apart are regular
+    // over three steps, they are the beats. In 4/4 those lags fall between the onsets.
+    const double twoThirds = bestPeriod * 2.0 / 3.0;
+    if (twoThirds >= shortestPeriod * 0.98)
+    {
+        const double thirdsPeriod = refine (std::max (twoThirds, shortestPeriod), 1.0);
+        if (comb (thirdsPeriod, 3) > 0.9 * comb (bestPeriod, 2))
+            bestPeriod = thirdsPeriod;
+    }
+
     // When the onsets half a beat apart are just as regular as the beats themselves, they are
     // the beats: an even pulse at 180 is 180, not 90 with something on every offbeat.
     const double half = bestPeriod * 0.5;

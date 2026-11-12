@@ -49,7 +49,7 @@ if(BACKLINE_BUILD_PLUGIN)
         assets/Inter-Medium.ttf assets/Inter-SemiBold.ttf)
     set_target_properties(BacklineAssets PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-    target_sources(Backline PRIVATE plugin/PluginProcessor.cpp plugin/PluginEditor.cpp)
+    target_sources(Backline PRIVATE plugin/PluginProcessor.cpp plugin/PluginEditor.cpp plugin/Instruments.cpp)
     target_compile_definitions(Backline PUBLIC
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0
         JUCE_DISPLAY_SPLASH_SCREEN=0)
@@ -59,7 +59,7 @@ if(BACKLINE_BUILD_PLUGIN)
 
     juce_add_console_app(backline_plugin_tests)
     target_sources(backline_plugin_tests PRIVATE
-        tests/PluginTests.cpp plugin/PluginProcessor.cpp plugin/PluginEditor.cpp)
+        tests/PluginTests.cpp plugin/PluginProcessor.cpp plugin/PluginEditor.cpp plugin/Instruments.cpp)
     target_compile_definitions(backline_plugin_tests PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
     target_link_libraries(backline_plugin_tests PRIVATE backline_core BacklineAssets juce::juce_audio_utils)
@@ -67,7 +67,7 @@ if(BACKLINE_BUILD_PLUGIN)
 
     juce_add_console_app(backline_screenshot)
     target_sources(backline_screenshot PRIVATE
-        tests/Screenshot.cpp plugin/PluginProcessor.cpp plugin/PluginEditor.cpp)
+        tests/Screenshot.cpp plugin/PluginProcessor.cpp plugin/PluginEditor.cpp plugin/Instruments.cpp)
     target_compile_definitions(backline_screenshot PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
     target_link_libraries(backline_screenshot PRIVATE backline_core BacklineAssets juce::juce_audio_utils)

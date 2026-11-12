@@ -57,8 +57,9 @@ struct Hits
 };
 }
 
-std::vector<Note> renderChords (const Progression& progression, ChordRhythm rhythm)
+std::vector<Note> renderChords (const Progression& progression, ChordRhythm rhythm, double beatsPerBar)
 {
+    const double bar = beatsPerBar > 1.0e-9 ? beatsPerBar : 4.0;
     std::vector<Note> notes;
     double centre = 60.0;
     for (const auto& event : progression)
@@ -76,11 +77,28 @@ std::vector<Note> renderChords (const Progression& progression, ChordRhythm rhyt
             case ChordRhythm::Quarters: hits.addEvery (span, 1.0, 0.0, 0.9); break;
             case ChordRhythm::Offbeat:  hits.addEvery (span, 1.0, 0.5, 0.4); break;
             case ChordRhythm::Dotted:
-                for (double bar = 0.0; bar < span - 1.0e-9; bar += 4.0)
-                    for (double t : { 0.0, 1.5, 3.0 })
-                        if (bar + t < span - 1.0e-9)
-                            hits.add (bar + t, std::min (t < 3.0 ? 1.4 : 0.9, span - bar - t));
+            {
+                // A dotted quarter figure that starts again on every bar line of the loop. Each
+                // hit lasts until shortly before the next one (or the bar line).
+                const double end = event.start + span;
+                std::vector<double> starts, lengths;
+                for (double barStart = std::floor (event.start / bar + 1.0e-9) * bar; barStart < end - 1.0e-9; barStart += bar)
+                    for (double t = 0.0; t < bar - 1.0e-9; t += 1.5)
+                    {
+                        const double hit = barStart + t;
+                        if (hit < event.start - 1.0e-9 || hit >= end - 1.0e-9)
+                            continue;
+                        const double next = std::min (hit + 1.5, barStart + bar);
+                        starts.push_back (hit - event.start);
+                        lengths.push_back (std::min (std::min (1.4, std::max (next - hit - 0.1, 0.5 * (next - hit))), end - hit));
+                    }
+                // A chord that starts between the hits is struck on its start as well.
+                if (starts.empty() || starts.front() > 1.0e-9)
+                    hits.add (0.0, std::min (1.4, starts.empty() ? span : starts.front()));
+                for (size_t h = 0; h < starts.size(); ++h)
+                    hits.add (std::max (0.0, starts[h]), lengths[h]);
                 break;
+            }
         }
         hits.ensureOne (span);
 

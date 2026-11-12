@@ -83,7 +83,8 @@ std::string qualitySuffix (Quality quality)
 
 std::string chordName (Chord chord)
 {
-    std::string name = pitchClassName (chord.root) + qualitySuffix (chord.quality);
+    const int root = wrapPitchClass (chord.root);
+    std::string name = (chord.sharpRoot ? sharpNames[root] : noteNames[root]) + qualitySuffix (chord.quality);
     if (chord.bassPitchClass() != wrapPitchClass (chord.root))
         name += "/" + pitchClassName (chord.bassPitchClass());
     return name;
@@ -91,7 +92,11 @@ std::string chordName (Chord chord)
 
 std::string chordName (Chord chord, Key key)
 {
-    std::string name = pitchClassName (chord.root, key) + qualitySuffix (chord.quality);
+    // A chord that leads up a semitone from outside the key is written with a sharp (F#dim
+    // before Gm in F major), whatever the key's own accidentals.
+    const int root = wrapPitchClass (chord.root);
+    std::string name = (chord.sharpRoot && ! isInScale (root, key) ? std::string (sharpNames[root]) : pitchClassName (root, key))
+                     + qualitySuffix (chord.quality);
     if (chord.bassPitchClass() != wrapPitchClass (chord.root))
         name += "/" + pitchClassName (chord.bassPitchClass(), key);
     return name;
@@ -263,12 +268,16 @@ std::vector<double> boundariesOf (const Progression& progression)
     return bounds;
 }
 
-Progression fromBoundaries (const std::vector<Chord>& chords, const std::vector<double>& bounds)
+// The events placed on new boundaries (event i from bounds[i] to bounds[i + 1]); each keeps its
+// chord and flags.
+Progression withBoundaries (Progression events, const std::vector<double>& bounds)
 {
-    Progression result;
-    for (size_t i = 0; i < chords.size(); ++i)
-        result.push_back ({ chords[i], bounds[i], bounds[i + 1] - bounds[i] });
-    return result;
+    for (size_t i = 0; i < events.size(); ++i)
+    {
+        events[i].start = bounds[i];
+        events[i].length = bounds[i + 1] - bounds[i];
+    }
+    return events;
 }
 
 // In a minor key the raised 7th (the third of the major V) belongs as well.
@@ -330,7 +339,10 @@ Progression setChord (const Progression& progression, size_t index, Chord chord)
 {
     Progression result = progression;
     if (index < result.size())
+    {
         result[index].chord = chord;
+        result[index].coloured = false;
+    }
     return result;
 }
 
@@ -351,11 +363,11 @@ Progression splitChord (const Progression& progression, size_t index, double gri
     if (first < tiny || length - first < tiny)
         return progression;
 
-    auto chords = chordsOf (progression);
+    auto events = progression;
     auto bounds = boundariesOf (progression);
-    chords.insert (chords.begin() + (std::ptrdiff_t) index, progression[index].chord);
+    events.insert (events.begin() + (std::ptrdiff_t) index, progression[index]);
     bounds.insert (bounds.begin() + (std::ptrdiff_t) index + 1, progression[index].start + first);
-    return fromBoundaries (chords, bounds);
+    return withBoundaries (std::move (events), bounds);
 }
 
 Progression moveBoundary (const Progression& progression, size_t boundary, double beat, double gridBeats)
@@ -390,7 +402,7 @@ Progression moveBoundary (const Progression& progression, size_t boundary, doubl
         return progression;
 
     bounds[boundary + 1] = target;
-    return fromBoundaries (chordsOf (progression), bounds);
+    return withBoundaries (progression, bounds);
 }
 
 Progression deleteChord (const Progression& progression, size_t index)
@@ -398,13 +410,13 @@ Progression deleteChord (const Progression& progression, size_t index)
     if (progression.size() < 2 || index >= progression.size())
         return progression;
 
-    auto chords = chordsOf (progression);
+    auto events = progression;
     auto bounds = boundariesOf (progression);
-    chords.erase (chords.begin() + (std::ptrdiff_t) index);
+    events.erase (events.begin() + (std::ptrdiff_t) index);
     // Dropping a chord's start hands its time to the chord before it. The first chord's start
     // stays (the loop begins at 0) and the next start goes instead, which hands the time forward.
     bounds.erase (bounds.begin() + (std::ptrdiff_t) (index == 0 ? 1 : index));
-    return fromBoundaries (chords, bounds);
+    return withBoundaries (std::move (events), bounds);
 }
 
 Chord passingChord (Chord from, Chord to, Key key)
@@ -414,9 +426,10 @@ Chord passingChord (Chord from, Chord to, Key key)
     const auto diatonic = chordsInKey (key);
     auto usable = [&] (Chord c) { return ! sameChordType (c, from) && ! sameChordType (c, to); };
 
-    // A tone up: the diminished chord on the semitone between the two roots.
+    // A tone up: the diminished chord on the semitone between the two roots, which leads up
+    // into the next chord (spelled with a sharp: C#dim, F#dim).
     if (up == 2)
-        return { (fromRoot + 1) % 12, Quality::Diminished };
+        return { (fromRoot + 1) % 12, Quality::Diminished, -1, true };
 
     // A third up: the key's chord on the scale note between the roots (C, Dm, Em).
     if (up == 3 || up == 4)
@@ -442,7 +455,7 @@ Chord passingChord (Chord from, Chord to, Key key)
     const Chord dominant { (toRoot + 7) % 12, Quality::Dominant7 };
     if (! sameChordType (dominant, from))
         return dominant;
-    return { (toRoot + 11) % 12, Quality::Diminished };
+    return { (toRoot + 11) % 12, Quality::Diminished, -1, true };
 }
 
 Progression insertPassingChord (const Progression& progression, size_t index, Key key)
@@ -454,11 +467,13 @@ Progression insertPassingChord (const Progression& progression, size_t index, Ke
     const double taken = event.length >= 2.0 - tiny ? 1.0 : event.length * 0.5;
     const Chord next = progression[(index + 1) % progression.size()].chord;
 
-    auto chords = chordsOf (progression);
+    ChordEvent passing;
+    passing.chord = passingChord (event.chord, next, key);
+    auto events = progression;
     auto bounds = boundariesOf (progression);
-    chords.insert (chords.begin() + (std::ptrdiff_t) index + 1, passingChord (event.chord, next, key));
     bounds.insert (bounds.begin() + (std::ptrdiff_t) index + 1, event.start + event.length - taken);
-    return fromBoundaries (chords, bounds);
+    events.insert (events.begin() + (std::ptrdiff_t) index + 1, passing);
+    return withBoundaries (std::move (events), bounds);
 }
 
 std::vector<Chord> chordVariations (Chord chord, Key key)
@@ -474,7 +489,7 @@ std::vector<Chord> chordVariations (Chord chord, Key key)
 
     for (int q = 0; q < numQualities; ++q)
     {
-        const Chord candidate { root, (Quality) q };
+        const Chord candidate { root, (Quality) q, -1, chord.sharpRoot };
         bool fits = true;
         for (int pc : chordPitchClasses (candidate))
             fits = fits && fitsKey (pc, key);
@@ -483,8 +498,8 @@ std::vector<Chord> chordVariations (Chord chord, Key key)
     }
 
     const auto pcs = chordPitchClasses (chord);
-    add ({ root, chord.quality, pcs[1] });
-    add ({ root, chord.quality, pcs[2] });
+    add ({ root, chord.quality, pcs[1], chord.sharpRoot });
+    add ({ root, chord.quality, pcs[2], chord.sharpRoot });
     return variations;
 }
 
@@ -508,7 +523,14 @@ Progression withSevenths (const Progression& progression, Key key)
 {
     Progression result = progression;
     for (auto& e : result)
-        e.chord = seventhChord (e.chord, key);
+    {
+        const Chord coloured = seventhChord (e.chord, key);
+        if (coloured != e.chord)
+        {
+            e.chord = coloured;
+            e.coloured = true;
+        }
+    }
     return result;
 }
 
@@ -533,7 +555,11 @@ Progression withoutSevenths (const Progression& progression)
 {
     Progression result = progression;
     for (auto& e : result)
-        e.chord = triadChord (e.chord);
+        if (e.coloured)
+        {
+            e.chord = triadChord (e.chord);
+            e.coloured = false;
+        }
     return result;
 }
 }

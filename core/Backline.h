@@ -25,6 +25,9 @@ struct Chord
     int root = 0;                     // pitch class, 0 = C
     Quality quality = Quality::Major;
     int bass = -1;                    // pitch class of the bass note (inversion / slash chord), -1 = the root
+    // Spelling only: a root outside the key is written with a sharp (F#dim, not Gbdim, for a
+    // chord that leads up a semitone). Not part of ==.
+    bool sharpRoot = false;
 
     // The bass note as a pitch class, whether or not it was given.
     int bassPitchClass() const { return (((bass < 0 ? root : bass) % 12) + 12) % 12; }
@@ -41,6 +44,9 @@ struct ChordEvent
     Chord chord;
     double start = 0.0;
     double length = 4.0;
+    // The chord's 7th was added by withSevenths, so withoutSevenths takes it away again. Every
+    // other edit of the chord clears it. Not part of ==.
+    bool coloured = false;
     // Equal when the chord is the same and the times agree to a billionth of a beat.
     bool operator== (const ChordEvent& o) const
     {
@@ -116,14 +122,15 @@ std::vector<std::vector<Chord>> suggestProgressions (const std::vector<Chroma>& 
 
 // Progressions. Everything below is a pure function: it returns a new value and leaves its
 // argument alone. An edit that cannot be made (index out of range, chord too short, last chord)
-// returns the progression unchanged, so a result is always valid if the input was.
+// returns the progression unchanged, so a result is always valid if the input was. Edits that
+// only move times (split, move, delete, insert) keep each chord's `coloured` flag.
 Progression toProgression (const std::vector<Chord>& chords, double beatsPerChord); // fixed grid to events
 std::vector<Chord> chordsOf (const Progression& progression);
 double progressionLength (const Progression& progression);                         // loop length in beats
 bool isValidProgression (const Progression& progression);                          // see Progression; empty is not valid
 int chordIndexAt (const Progression& progression, double beat);                    // -1 outside the loop
 
-// Replace one chord, keeping its place and length.
+// Replace one chord, keeping its place and length. The new chord is the user's (not coloured).
 Progression setChord (const Progression& progression, size_t index, Chord chord);
 // Cut a chord in two at its middle, snapped to `gridBeats` (0 = exact middle). Both parts keep the
 // chord and are at least one grid step long; a chord shorter than two steps is left whole.
@@ -142,27 +149,34 @@ Progression insertPassingChord (const Progression& progression, size_t index, Ke
 // The chord insertPassingChord uses: a diatonic chord or inversion that fills in a third, a
 // passing diminished chord between two roots a tone apart, otherwise the dominant 7th of `to`
 // (its leading-note diminished chord if `from` already is that dominant). Never equal to `from` or `to`.
+// The diminished chords lead up a semitone, so they are spelled with a sharp (sharpRoot).
 Chord passingChord (Chord from, Chord to, Key key);
 
 // Other forms of one chord for a "change chord type" menu: the same root in every quality whose
 // notes belong to the key (in a minor key the raised 7th counts as well; for a root outside the
 // key, every quality), in root position, followed by the chord with its third and its fifth in
-// the bass. The chord itself is not in the list.
+// the bass. The chord itself is not in the list. They are spelled like the chord (sharpRoot).
 std::vector<Chord> chordVariations (Chord chord, Key key);
 
 // The "sevenths" colouring. A major or minor triad gets the 7th the key gives it (I becomes
 // Imaj7, ii becomes ii7, V becomes V7); a minor triad whose diatonic 7th is major, a triad on a
 // root outside the key, and chords that are not plain triads stay as they are. The bass is kept.
 Chord seventhChord (Chord chord, Key key);
+// Colours every chord and marks the ones it changed (`coloured`).
 Progression withSevenths (const Progression& progression, Key key);
 // The reverse: Dominant7 and Major7 become Major, Minor7 becomes Minor.
 Chord triadChord (Chord chord);
+// Takes back only the 7ths withSevenths added: a 7th chord that was picked or inserted (a passing
+// dominant, a choice from a menu) stays as it is.
 Progression withoutSevenths (const Progression& progression);
 
-// Parts. Each chord plays the rhythm from its own start and always sounds at least once.
-// Chord voicings hold every chord tone (four notes for 7th chords), stay close to the previous
-// voicing, and put the bass note of a slash chord at the bottom. The bass part plays the bass note.
-std::vector<Note> renderChords (const Progression& progression, ChordRhythm rhythm);
+// Parts. Every chord always sounds at least once. Sustain, quarters and offbeats play from each
+// chord's own start; the dotted figure (0, 1.5 and 3 in 4/4; 0 and 1.5 in 3/4) follows the bar
+// lines of the loop, `beatsPerBar` apart, and a chord that starts between its hits is struck on
+// its start as well. Chord voicings hold every chord tone (four notes for 7th chords), stay close
+// to the previous voicing, and put the bass note of a slash chord at the bottom. The bass part
+// plays the bass note.
+std::vector<Note> renderChords (const Progression& progression, ChordRhythm rhythm, double beatsPerBar = 4.0);
 std::vector<Note> renderBass (const Progression& progression, BassRhythm rhythm);
 // Fixed grid shorthand for renderChords (toProgression (chords, beatsPerChord), rhythm).
 std::vector<Note> renderChords (const std::vector<Chord>& progression, double beatsPerChord, ChordRhythm rhythm);

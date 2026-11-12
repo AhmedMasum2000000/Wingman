@@ -9,6 +9,11 @@ on:
         description: "Publish a GitHub release with this version (for example 0.1.0). Leave empty to only build."
         required: false
         default: ""
+      prerelease:
+        description: "Publish as a beta (pre-release). The 'latest' download links keep pointing at the last full release."
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: write
@@ -79,6 +84,8 @@ jobs:
           tag_name: v${{ inputs.version }}
           target_commitish: ${{ github.sha }}
           name: Backline ${{ inputs.version }}
+          prerelease: ${{ inputs.prerelease }}
+          make_latest: ${{ inputs.prerelease && 'false' || 'true' }}
           body: |
             Backline for Windows (64-bit): VST3 plugin and standalone app.
 
