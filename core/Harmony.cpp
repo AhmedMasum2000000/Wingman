@@ -33,12 +33,11 @@ const float minorMoves[7][7] = {
     { 1.0f, 0.2f, 0.3f, 0.1f, 0.6f, 0.2f, 0.1f },
 };
 
+// Root, third (or suspension) and fifth; a 7th does not change how well a chord fits.
 float fit (const Chroma& c, Chord chord)
 {
-    const int third = chord.quality == Quality::Major ? 4 : 3;
-    return 1.1f * c[(size_t) chord.root]
-         + 1.0f * c[(size_t) ((chord.root + third) % 12)]
-         + 0.9f * c[(size_t) ((chord.root + 7) % 12)];
+    const auto pcs = chordPitchClasses (chord);
+    return 1.1f * c[(size_t) pcs[0]] + 1.0f * c[(size_t) pcs[1]] + 0.9f * c[(size_t) pcs[2]];
 }
 
 float move (Key key, size_t from, size_t to)
@@ -56,6 +55,9 @@ std::string pitchClassName (int pitchClass, Key key)
     const int relativeMajor = wrapPitchClass (key.tonic + (key.minor ? 3 : 0));
     // Position on the circle of fifths: 1 to 6 are the sharp keys G D A E B F#, 7 to 11 the flat keys Db Ab Eb Bb F.
     const int fifths = (relativeMajor * 7) % 12;
+    // The raised 7th of a minor key is the note under the tonic, sharpened: G# in A minor, C# in D minor.
+    if (key.minor && pc == wrapPitchClass (key.tonic + 11))
+        return sharpNames[pc];
     if (fifths == 0)
         return noteNames[pc]; // C major and A minor have no accidentals to follow
     if (fifths == 6 && key.minor)
@@ -63,14 +65,78 @@ std::string pitchClassName (int pitchClass, Key key)
     return fifths <= 6 ? sharpNames[pc] : flatNames[pc];
 }
 
+std::string qualitySuffix (Quality quality)
+{
+    switch (quality)
+    {
+        case Quality::Major:      return "";
+        case Quality::Minor:      return "m";
+        case Quality::Dominant7:  return "7";
+        case Quality::Major7:     return "maj7";
+        case Quality::Minor7:     return "m7";
+        case Quality::Sus2:       return "sus2";
+        case Quality::Sus4:       return "sus4";
+        case Quality::Diminished: return "dim";
+    }
+    return "";
+}
+
 std::string chordName (Chord chord)
 {
-    return pitchClassName (chord.root) + (chord.quality == Quality::Minor ? "m" : "");
+    std::string name = pitchClassName (chord.root) + qualitySuffix (chord.quality);
+    if (chord.bassPitchClass() != wrapPitchClass (chord.root))
+        name += "/" + pitchClassName (chord.bassPitchClass());
+    return name;
 }
 
 std::string chordName (Chord chord, Key key)
 {
-    return pitchClassName (chord.root, key) + (chord.quality == Quality::Minor ? "m" : "");
+    std::string name = pitchClassName (chord.root, key) + qualitySuffix (chord.quality);
+    if (chord.bassPitchClass() != wrapPitchClass (chord.root))
+        name += "/" + pitchClassName (chord.bassPitchClass(), key);
+    return name;
+}
+
+std::vector<int> chordIntervals (Quality quality)
+{
+    switch (quality)
+    {
+        case Quality::Major:      return { 0, 4, 7 };
+        case Quality::Minor:      return { 0, 3, 7 };
+        case Quality::Dominant7:  return { 0, 4, 7, 10 };
+        case Quality::Major7:     return { 0, 4, 7, 11 };
+        case Quality::Minor7:     return { 0, 3, 7, 10 };
+        case Quality::Sus2:       return { 0, 2, 7 };
+        case Quality::Sus4:       return { 0, 5, 7 };
+        case Quality::Diminished: return { 0, 3, 6 };
+    }
+    return { 0, 4, 7 };
+}
+
+std::vector<int> chordPitchClasses (Chord chord)
+{
+    auto pcs = chordIntervals (chord.quality);
+    for (auto& pc : pcs)
+        pc = wrapPitchClass (chord.root + pc);
+    return pcs;
+}
+
+bool hasSeventh (Quality quality)
+{
+    return quality == Quality::Dominant7 || quality == Quality::Major7 || quality == Quality::Minor7;
+}
+
+bool hasMinorThird (Quality quality)
+{
+    return quality == Quality::Minor || quality == Quality::Minor7 || quality == Quality::Diminished;
+}
+
+bool isInScale (int pitchClass, Key key)
+{
+    static const bool major[12] = { true, false, true, false, true, true, false, true, false, true, false, true };
+    static const bool minor[12] = { true, false, true, true, false, true, false, true, true, false, true, false };
+    const int degree = wrapPitchClass (pitchClass - key.tonic);
+    return key.minor ? minor[degree] : major[degree];
 }
 
 std::string keyName (Key key)
@@ -80,7 +146,7 @@ std::string keyName (Key key)
 
 std::vector<Chord> chordsInKey (Key key)
 {
-    const int t = key.tonic;
+    const int t = wrapPitchClass (key.tonic);
     auto ch = [t] (int interval, Quality q) { return Chord { (t + interval) % 12, q }; };
     if (key.minor)
         return { ch (0, Quality::Minor), ch (3, Quality::Major), ch (5, Quality::Minor), ch (7, Quality::Minor),
@@ -178,5 +244,296 @@ std::vector<std::vector<Chord>> suggestProgressions (const std::vector<Chroma>& 
         }
     }
     return ideas;
+}
+
+// ---- Progressions ---------------------------------------------------------------------------
+
+namespace
+{
+const double tiny = 1.0e-9;
+
+// Start of every chord plus the end of the last one.
+std::vector<double> boundariesOf (const Progression& progression)
+{
+    std::vector<double> bounds;
+    for (const auto& e : progression)
+        bounds.push_back (e.start);
+    if (! progression.empty())
+        bounds.push_back (progression.back().start + progression.back().length);
+    return bounds;
+}
+
+Progression fromBoundaries (const std::vector<Chord>& chords, const std::vector<double>& bounds)
+{
+    Progression result;
+    for (size_t i = 0; i < chords.size(); ++i)
+        result.push_back ({ chords[i], bounds[i], bounds[i + 1] - bounds[i] });
+    return result;
+}
+
+// In a minor key the raised 7th (the third of the major V) belongs as well.
+bool fitsKey (int pitchClass, Key key)
+{
+    return isInScale (pitchClass, key) || (key.minor && wrapPitchClass (pitchClass - key.tonic) == 11);
+}
+
+bool sameChordType (Chord a, Chord b)
+{
+    return wrapPitchClass (a.root) == wrapPitchClass (b.root) && a.quality == b.quality;
+}
+}
+
+Progression toProgression (const std::vector<Chord>& chords, double beatsPerChord)
+{
+    Progression result;
+    for (size_t i = 0; i < chords.size(); ++i)
+        result.push_back ({ chords[i], (double) i * beatsPerChord, beatsPerChord });
+    return result;
+}
+
+std::vector<Chord> chordsOf (const Progression& progression)
+{
+    std::vector<Chord> chords;
+    for (const auto& e : progression)
+        chords.push_back (e.chord);
+    return chords;
+}
+
+double progressionLength (const Progression& progression)
+{
+    return progression.empty() ? 0.0 : progression.back().start + progression.back().length;
+}
+
+bool isValidProgression (const Progression& progression)
+{
+    if (progression.empty())
+        return false;
+    double expected = 0.0;
+    for (const auto& e : progression)
+    {
+        if (! (e.length > tiny) || std::abs (e.start - expected) > tiny)
+            return false;
+        expected = e.start + e.length;
+    }
+    return true;
+}
+
+int chordIndexAt (const Progression& progression, double beat)
+{
+    for (size_t i = 0; i < progression.size(); ++i)
+        if (beat >= progression[i].start && beat < progression[i].start + progression[i].length)
+            return (int) i;
+    return -1;
+}
+
+Progression setChord (const Progression& progression, size_t index, Chord chord)
+{
+    Progression result = progression;
+    if (index < result.size())
+        result[index].chord = chord;
+    return result;
+}
+
+Progression splitChord (const Progression& progression, size_t index, double gridBeats)
+{
+    if (index >= progression.size())
+        return progression;
+
+    const double length = progression[index].length;
+    double first = length * 0.5;
+    if (gridBeats > tiny)
+    {
+        if (length < 2.0 * gridBeats - tiny)
+            return progression;
+        first = std::round (first / gridBeats) * gridBeats;
+        first = std::min (std::max (first, gridBeats), length - gridBeats);
+    }
+    if (first < tiny || length - first < tiny)
+        return progression;
+
+    auto chords = chordsOf (progression);
+    auto bounds = boundariesOf (progression);
+    chords.insert (chords.begin() + (std::ptrdiff_t) index, progression[index].chord);
+    bounds.insert (bounds.begin() + (std::ptrdiff_t) index + 1, progression[index].start + first);
+    return fromBoundaries (chords, bounds);
+}
+
+Progression moveBoundary (const Progression& progression, size_t boundary, double beat, double gridBeats)
+{
+    if (boundary + 1 >= progression.size())
+        return progression;
+
+    auto bounds = boundariesOf (progression);
+    const double step = std::max (gridBeats, 0.0);
+    const double lowest = bounds[boundary] + step, highest = bounds[boundary + 2] - step;
+    if (lowest > highest + tiny)
+        return progression; // no room for both chords to keep a grid step
+
+    double target = beat;
+    if (step > tiny)
+    {
+        target = std::round (beat / step) * step;
+        // Outside the allowed range: the nearest grid line inside it, or its edge if no line is.
+        if (target < lowest - tiny)
+        {
+            target = std::ceil (lowest / step - tiny) * step;
+            if (target > highest + tiny) target = lowest;
+        }
+        else if (target > highest + tiny)
+        {
+            target = std::floor (highest / step + tiny) * step;
+            if (target < lowest - tiny) target = highest;
+        }
+    }
+    target = std::min (std::max (target, lowest), highest);
+    if (target - bounds[boundary] < tiny || bounds[boundary + 2] - target < tiny)
+        return progression;
+
+    bounds[boundary + 1] = target;
+    return fromBoundaries (chordsOf (progression), bounds);
+}
+
+Progression deleteChord (const Progression& progression, size_t index)
+{
+    if (progression.size() < 2 || index >= progression.size())
+        return progression;
+
+    auto chords = chordsOf (progression);
+    auto bounds = boundariesOf (progression);
+    chords.erase (chords.begin() + (std::ptrdiff_t) index);
+    // Dropping a chord's start hands its time to the chord before it. The first chord's start
+    // stays (the loop begins at 0) and the next start goes instead, which hands the time forward.
+    bounds.erase (bounds.begin() + (std::ptrdiff_t) (index == 0 ? 1 : index));
+    return fromBoundaries (chords, bounds);
+}
+
+Chord passingChord (Chord from, Chord to, Key key)
+{
+    const int fromRoot = wrapPitchClass (from.root), toRoot = wrapPitchClass (to.root);
+    const int up = wrapPitchClass (toRoot - fromRoot);
+    const auto diatonic = chordsInKey (key);
+    auto usable = [&] (Chord c) { return ! sameChordType (c, from) && ! sameChordType (c, to); };
+
+    // A tone up: the diminished chord on the semitone between the two roots.
+    if (up == 2)
+        return { (fromRoot + 1) % 12, Quality::Diminished };
+
+    // A third up: the key's chord on the scale note between the roots (C, Dm, Em).
+    if (up == 3 || up == 4)
+        for (int step = 1; step < up; ++step)
+            for (auto c : diatonic)
+                if (c.root == (fromRoot + step) % 12 && usable (c))
+                    return c;
+
+    // A third down: walk the bass down through the scale note between the roots, under the
+    // key's chord that has that note as its third (C, G/B, Am).
+    if (up == 8 || up == 9)
+        for (int step = 1; step < 12 - up; ++step)
+        {
+            const int bass = wrapPitchClass (fromRoot - step);
+            if (isInScale (bass, key))
+                for (auto c : diatonic)
+                    if (chordPitchClasses (c)[1] == bass && usable (c))
+                        return { c.root, c.quality, bass };
+        }
+
+    // Anything else is approached by its own dominant 7th, or by the diminished chord on its
+    // leading note when the dominant is what we are coming from.
+    const Chord dominant { (toRoot + 7) % 12, Quality::Dominant7 };
+    if (! sameChordType (dominant, from))
+        return dominant;
+    return { (toRoot + 11) % 12, Quality::Diminished };
+}
+
+Progression insertPassingChord (const Progression& progression, size_t index, Key key)
+{
+    if (index >= progression.size() || progression[index].length < 0.25 - tiny)
+        return progression;
+
+    const auto& event = progression[index];
+    const double taken = event.length >= 2.0 - tiny ? 1.0 : event.length * 0.5;
+    const Chord next = progression[(index + 1) % progression.size()].chord;
+
+    auto chords = chordsOf (progression);
+    auto bounds = boundariesOf (progression);
+    chords.insert (chords.begin() + (std::ptrdiff_t) index + 1, passingChord (event.chord, next, key));
+    bounds.insert (bounds.begin() + (std::ptrdiff_t) index + 1, event.start + event.length - taken);
+    return fromBoundaries (chords, bounds);
+}
+
+std::vector<Chord> chordVariations (Chord chord, Key key)
+{
+    const int root = wrapPitchClass (chord.root);
+    const bool rootInKey = fitsKey (root, key);
+    std::vector<Chord> variations;
+    auto add = [&] (Chord c)
+    {
+        if (c != chord && std::find (variations.begin(), variations.end(), c) == variations.end())
+            variations.push_back (c);
+    };
+
+    for (int q = 0; q < numQualities; ++q)
+    {
+        const Chord candidate { root, (Quality) q };
+        bool fits = true;
+        for (int pc : chordPitchClasses (candidate))
+            fits = fits && fitsKey (pc, key);
+        if (fits || ! rootInKey || candidate.quality == chord.quality)
+            add (candidate);
+    }
+
+    const auto pcs = chordPitchClasses (chord);
+    add ({ root, chord.quality, pcs[1] });
+    add ({ root, chord.quality, pcs[2] });
+    return variations;
+}
+
+Chord seventhChord (Chord chord, Key key)
+{
+    if (chord.quality != Quality::Major && chord.quality != Quality::Minor)
+        return chord;
+    if (! isInScale (chord.root, key))
+        return chord;
+
+    const bool major = chord.quality == Quality::Major;
+    Chord result = chord;
+    if (isInScale (chord.root + 10, key))
+        result.quality = major ? Quality::Dominant7 : Quality::Minor7;
+    else if (major && isInScale (chord.root + 11, key))
+        result.quality = Quality::Major7;
+    return result;
+}
+
+Progression withSevenths (const Progression& progression, Key key)
+{
+    Progression result = progression;
+    for (auto& e : result)
+        e.chord = seventhChord (e.chord, key);
+    return result;
+}
+
+Chord triadChord (Chord chord)
+{
+    Chord result = chord;
+    if (chord.quality == Quality::Dominant7 || chord.quality == Quality::Major7)
+        result.quality = Quality::Major;
+    else if (chord.quality == Quality::Minor7)
+        result.quality = Quality::Minor;
+    // A 7th in the bass has nothing to stand on once the 7th is gone.
+    if (result.quality != chord.quality && chord.bass >= 0)
+    {
+        const auto pcs = chordPitchClasses (result);
+        if (std::find (pcs.begin(), pcs.end(), chord.bassPitchClass()) == pcs.end())
+            result.bass = -1;
+    }
+    return result;
+}
+
+Progression withoutSevenths (const Progression& progression)
+{
+    Progression result = progression;
+    for (auto& e : result)
+        e.chord = triadChord (e.chord);
+    return result;
 }
 }

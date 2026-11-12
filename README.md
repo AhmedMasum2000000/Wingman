@@ -63,4 +63,9 @@ libxext-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev`.
 - `tests/` - engine tests, an end-to-end plugin test with a simulated transport, and a tool
   that renders the interface to PNG (`backline_screenshot <dir>`)
 
-JUCE is used under its AGPLv3 option, which is fine for personal and open-source use.
+## Licence
+
+Backline is free and open source under the GNU Affero General Public License v3 (see `LICENSE`).
+You can use, copy and change it for free; if you distribute a modified version, share its source
+under the same licence. JUCE is used under its AGPLv3 option. The bundled fonts are under the
+SIL Open Font License (see `assets/README.md`).

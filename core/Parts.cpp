@@ -6,90 +6,138 @@ namespace backline
 {
 namespace
 {
-// Voice a chord close to the previous one so the part moves smoothly.
-std::array<int, 3> voice (Chord chord, double centre)
+int pitchClassOf (int pitch) { return ((pitch % 12) + 12) % 12; }
+
+// Voice a chord close to the previous one so the part moves smoothly: every chord tone goes
+// into the octave around `centre`. The bass note of a slash chord sits below all of them.
+std::vector<int> voice (Chord chord, double centre)
 {
-    const int intervals[3] = { 0, chord.quality == Quality::Major ? 4 : 3, 7 };
-    std::array<int, 3> pitches {};
-    for (size_t i = 0; i < 3; ++i)
+    const int lowest = (int) std::floor (centre) - 6;
+    const int bass = chord.bassPitchClass();
+    const bool slash = bass != pitchClassOf (chord.root);
+
+    std::vector<int> pitches;
+    for (int pc : chordPitchClasses (chord))
     {
-        const int pc = (chord.root + intervals[i]) % 12;
-        int pitch = (int) std::floor (centre) - 6;
-        while (pitch % 12 != pc) ++pitch;
-        pitches[i] = pitch;
+        if (slash && pc == bass)
+            continue; // it goes underneath instead
+        int pitch = lowest;
+        while (pitchClassOf (pitch) != pc) ++pitch;
+        pitches.push_back (pitch);
     }
     std::sort (pitches.begin(), pitches.end());
+
+    if (slash)
+    {
+        int pitch = pitches.front() - 1;
+        while (pitchClassOf (pitch) != bass) --pitch;
+        pitches.insert (pitches.begin(), pitch);
+    }
     return pitches;
 }
 
-void addHits (std::vector<double>& starts, std::vector<double>& lengths, double segment,
-              double step, double offset, double length)
+struct Hits
 {
-    for (double t = offset; t < segment - 1.0e-9; t += step)
+    std::vector<double> starts, lengths;
+
+    void add (double start, double length) { starts.push_back (start); lengths.push_back (length); }
+
+    void addEvery (double segment, double step, double offset, double length)
     {
-        starts.push_back (t);
-        lengths.push_back (std::min (length, segment - t));
+        for (double t = offset; t < segment - 1.0e-9; t += step)
+            add (t, std::min (length, segment - t));
     }
+
+    // A chord too short for its rhythm (an offbeat pattern on a half-beat chord) is still heard.
+    void ensureOne (double segment)
+    {
+        if (starts.empty())
+            add (0.0, segment);
+    }
+};
 }
+
+std::vector<Note> renderChords (const Progression& progression, ChordRhythm rhythm)
+{
+    std::vector<Note> notes;
+    double centre = 60.0;
+    for (const auto& event : progression)
+    {
+        const auto pitches = voice (event.chord, centre);
+        double sum = 0.0;
+        for (int p : pitches) sum += (double) p;
+        centre = std::min (std::max (sum / (double) pitches.size(), 55.0), 67.0);
+
+        const double span = event.length;
+        Hits hits;
+        switch (rhythm)
+        {
+            case ChordRhythm::Sustain:  hits.add (0.0, span); break;
+            case ChordRhythm::Quarters: hits.addEvery (span, 1.0, 0.0, 0.9); break;
+            case ChordRhythm::Offbeat:  hits.addEvery (span, 1.0, 0.5, 0.4); break;
+            case ChordRhythm::Dotted:
+                for (double bar = 0.0; bar < span - 1.0e-9; bar += 4.0)
+                    for (double t : { 0.0, 1.5, 3.0 })
+                        if (bar + t < span - 1.0e-9)
+                            hits.add (bar + t, std::min (t < 3.0 ? 1.4 : 0.9, span - bar - t));
+                break;
+        }
+        hits.ensureOne (span);
+
+        for (size_t h = 0; h < hits.starts.size(); ++h)
+            for (int p : pitches)
+                notes.push_back ({ p, event.start + hits.starts[h], hits.lengths[h], h == 0 ? 100 : 86 });
+    }
+    return notes;
+}
+
+std::vector<Note> renderBass (const Progression& progression, BassRhythm rhythm)
+{
+    std::vector<Note> notes;
+    for (const auto& event : progression)
+    {
+        const Chord chord = event.chord;
+        const int low = 36 + chord.bassPitchClass(); // C2..B2
+
+        // The note the root-and-fifth pattern alternates with: the chord's fifth, or for a
+        // slash chord the root above the bass note.
+        int other = low + chordIntervals (chord.quality)[2];
+        if (chord.bassPitchClass() != pitchClassOf (chord.root))
+        {
+            other = low + 1;
+            while (pitchClassOf (other) != pitchClassOf (chord.root)) ++other;
+        }
+
+        const double span = event.length;
+        Hits hits;
+        switch (rhythm)
+        {
+            case BassRhythm::Sustain:   hits.add (0.0, span); break;
+            case BassRhythm::Eighths:
+            case BassRhythm::Octaves:   hits.addEvery (span, 0.5, 0.0, 0.45); break;
+            case BassRhythm::RootFifth: hits.addEvery (span, 1.0, 0.0, 0.9); break;
+            case BassRhythm::Offbeat:   hits.addEvery (span, 1.0, 0.5, 0.45); break;
+        }
+        hits.ensureOne (span);
+
+        for (size_t h = 0; h < hits.starts.size(); ++h)
+        {
+            int pitch = low;
+            if (rhythm == BassRhythm::Octaves && h % 2 == 1) pitch += 12;
+            if (rhythm == BassRhythm::RootFifth && h % 2 == 1) pitch = other;
+            notes.push_back ({ pitch, event.start + hits.starts[h], hits.lengths[h], h == 0 ? 110 : 96 });
+        }
+    }
+    return notes;
 }
 
 std::vector<Note> renderChords (const std::vector<Chord>& progression, double beatsPerChord, ChordRhythm rhythm)
 {
-    std::vector<Note> notes;
-    double centre = 60.0;
-    for (size_t i = 0; i < progression.size(); ++i)
-    {
-        const auto pitches = voice (progression[i], centre);
-        centre = std::clamp ((pitches[0] + pitches[1] + pitches[2]) / 3.0, 55.0, 67.0);
-
-        std::vector<double> starts, lengths;
-        switch (rhythm)
-        {
-            case ChordRhythm::Sustain:  starts.push_back (0.0); lengths.push_back (beatsPerChord); break;
-            case ChordRhythm::Quarters: addHits (starts, lengths, beatsPerChord, 1.0, 0.0, 0.9); break;
-            case ChordRhythm::Offbeat:  addHits (starts, lengths, beatsPerChord, 1.0, 0.5, 0.4); break;
-            case ChordRhythm::Dotted:
-                for (double bar = 0.0; bar < beatsPerChord - 1.0e-9; bar += 4.0)
-                    for (double t : { 0.0, 1.5, 3.0 })
-                        if (bar + t < beatsPerChord - 1.0e-9)
-                        {
-                            starts.push_back (bar + t);
-                            lengths.push_back (std::min (t < 3.0 ? 1.4 : 0.9, beatsPerChord - bar - t));
-                        }
-                break;
-        }
-        const double base = (double) i * beatsPerChord;
-        for (size_t h = 0; h < starts.size(); ++h)
-            for (int p : pitches)
-                notes.push_back ({ p, base + starts[h], lengths[h], h == 0 ? 100 : 86 });
-    }
-    return notes;
+    return renderChords (toProgression (progression, beatsPerChord), rhythm);
 }
 
 std::vector<Note> renderBass (const std::vector<Chord>& progression, double beatsPerChord, BassRhythm rhythm)
 {
-    std::vector<Note> notes;
-    for (size_t i = 0; i < progression.size(); ++i)
-    {
-        const int root = 36 + progression[i].root; // C2..B2
-        const double base = (double) i * beatsPerChord;
-        std::vector<double> starts, lengths;
-        switch (rhythm)
-        {
-            case BassRhythm::Sustain:   starts.push_back (0.0); lengths.push_back (beatsPerChord); break;
-            case BassRhythm::Eighths:
-            case BassRhythm::Octaves:   addHits (starts, lengths, beatsPerChord, 0.5, 0.0, 0.45); break;
-            case BassRhythm::RootFifth: addHits (starts, lengths, beatsPerChord, 1.0, 0.0, 0.9); break;
-            case BassRhythm::Offbeat:   addHits (starts, lengths, beatsPerChord, 1.0, 0.5, 0.45); break;
-        }
-        for (size_t h = 0; h < starts.size(); ++h)
-        {
-            int pitch = root;
-            if (rhythm == BassRhythm::Octaves && h % 2 == 1) pitch += 12;
-            if (rhythm == BassRhythm::RootFifth && h % 2 == 1) pitch += 7;
-            notes.push_back ({ pitch, base + starts[h], lengths[h], h == 0 ? 110 : 96 });
-        }
-    }
-    return notes;
+    return renderBass (toProgression (progression, beatsPerChord), rhythm);
 }
 }

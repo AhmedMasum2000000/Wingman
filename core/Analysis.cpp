@@ -309,4 +309,174 @@ std::vector<Note> audioToNotes (const float* mono, size_t numSamples, double sam
     }
     return notes;
 }
+
+double estimateTempo (const float* mono, size_t numSamples, double sampleRate)
+{
+    if (mono == nullptr || sampleRate <= 0.0)
+        return 0.0;
+
+    // Onset strength 200 times a second: how much louder each part of the spectrum got.
+    // (A whole number of samples per frame: an uneven hop would put a rhythm of its own into it.)
+    const size_t hop = std::max ((size_t) 1, (size_t) std::lround (sampleRate / 200.0));
+    const double frameRate = sampleRate / (double) hop;
+    size_t n = 256;
+    while ((double) n < sampleRate * 0.02)
+        n <<= 1;
+    numSamples = std::min (numSamples, (size_t) (sampleRate * 60.0));
+    if ((double) numSamples < sampleRate * 2.0 || numSamples < n)
+        return 0.0;
+
+    float peak = 0.0f;
+    for (size_t i = 0; i < numSamples; ++i)
+        peak = std::max (peak, std::abs (mono[i]));
+    if (! (peak > 1.0e-6f))
+        return 0.0;
+    const float gain = 1.0f / peak;
+
+    std::vector<float> window (n);
+    for (size_t i = 0; i < n; ++i)
+        window[i] = (float) (0.5 - 0.5 * std::cos (2.0 * pi * (double) i / (double) n));
+
+    const size_t numFrames = (numSamples - n) / hop + 1;
+    const size_t numBins = n / 2;
+    const float compression = 1000.0f / (float) n;
+    std::vector<std::complex<float>> buffer (n);
+    std::vector<float> previous (numBins, 0.0f), current (numBins), onset (numFrames, 0.0f);
+    for (size_t f = 0; f < numFrames; ++f)
+    {
+        const size_t start = f * hop;
+        for (size_t i = 0; i < n; ++i)
+            buffer[i] = { mono[start + i] * gain * window[i], 0.0f };
+        fft (buffer);
+        float flux = 0.0f;
+        for (size_t k = 1; k < numBins; ++k)
+        {
+            current[k] = std::log (1.0f + compression * std::abs (buffer[k]));
+            flux += std::max (0.0f, current[k] - previous[k]);
+        }
+        if (f > 0)
+            onset[f] = flux;
+        previous.swap (current);
+    }
+
+    // Only real onsets count: the faint ripple a steady tone leaves is periodic too.
+    float strongest = 0.0f;
+    for (float v : onset)
+        strongest = std::max (strongest, v);
+    if (strongest < 0.01f * (float) numBins)
+        return 0.0; // nothing ever starts
+    for (auto& v : onset)
+        v = std::max (0.0f, v - 0.08f * strongest);
+
+    // Smooth a little so a click is a few frames wide, then remove the average.
+    std::vector<float> envelope (numFrames);
+    double mean = 0.0;
+    for (size_t f = 0; f < numFrames; ++f)
+    {
+        const float before = f > 0 ? onset[f - 1] : 0.0f, after = f + 1 < numFrames ? onset[f + 1] : 0.0f;
+        envelope[f] = 0.25f * before + 0.5f * onset[f] + 0.25f * after;
+        mean += (double) envelope[f];
+    }
+    mean /= (double) numFrames;
+    for (auto& v : envelope)
+        v -= (float) mean;
+
+    // Autocorrelation up to eight beats of the slowest tempo (or half the audio if it is short).
+    const double shortestPeriod = frameRate * 60.0 / maxTempo, longestPeriod = frameRate * 60.0 / minTempo;
+    const size_t maxLag = std::min ((size_t) (8.0 * longestPeriod) + 2, numFrames / 2);
+    if ((double) maxLag < longestPeriod + 2.0)
+        return 0.0;
+    std::vector<double> acf (maxLag + 1, 0.0);
+    for (size_t lag = 0; lag <= maxLag; ++lag)
+    {
+        double sum = 0.0;
+        for (size_t f = 0; f + lag < numFrames; ++f)
+            sum += (double) envelope[f] * (double) envelope[f + lag];
+        acf[lag] = sum / (double) (numFrames - lag);
+    }
+    if (! (acf[0] > 1.0e-12))
+        return 0.0;
+
+    // How regular the onsets are at a beat period: the autocorrelation at the first `beats`
+    // multiples of it, 1 for a perfect pulse.
+    auto comb = [&] (double period, int beats)
+    {
+        double sum = 0.0;
+        int used = 0;
+        for (int beat = 1; beat <= beats; ++beat)
+        {
+            const double lag = period * (double) beat;
+            const size_t below = (size_t) lag;
+            if (below + 1 > maxLag)
+                break;
+            const double fraction = lag - (double) below;
+            sum += acf[below] * (1.0 - fraction) + acf[below + 1] * fraction;
+            ++used;
+        }
+        return used > 0 ? sum / (double) used / acf[0] : 0.0;
+    };
+    // One and two beats rule out twice the real tempo (its odd beats fall between the onsets).
+    // Half the real tempo is as regular as the tempo itself, often more so (the snare comes
+    // round every two beats), so a preference for tempos near 120 decides between the two.
+    auto score = [&] (double period)
+    {
+        const double octaves = std::log2 (frameRate * 60.0 / period / 120.0);
+        return comb (period, 2) * std::exp (-0.5 * octaves * octaves / 0.6);
+    };
+    // The best period within `reach` frames of `centre`, to a hundredth of a frame. Many beats
+    // are lined up here: sixteen beats out, a small error in the period is plain to see.
+    auto refine = [&] (double centre, double reach)
+    {
+        const int beats = std::min (16, std::max (4, (int) ((double) (maxLag - 1) / (centre + reach))));
+        double best = centre, bestValue = comb (centre, beats);
+        for (double width = reach; width > 0.005; width *= 0.2)
+        {
+            const double middle = best;
+            for (int k = -5; k <= 5; ++k)
+            {
+                const double period = middle + (double) k * width * 0.2;
+                if (period < shortestPeriod || period > longestPeriod)
+                    continue;
+                const double value = comb (period, beats);
+                if (value > bestValue) { bestValue = value; best = period; }
+            }
+        }
+        return best;
+    };
+
+    const double step = 0.125;
+    double bestPeriod = 0.0, bestScore = 0.0;
+    for (double period = shortestPeriod; period <= longestPeriod + 1.0e-9; period += step)
+    {
+        const double s = score (period);
+        if (s > bestScore) { bestScore = s; bestPeriod = period; }
+    }
+    const double slowest = score (longestPeriod); // the steps above may stop just short of it
+    if (slowest > bestScore) { bestScore = slowest; bestPeriod = longestPeriod; }
+    // Nothing repeats (noise, a single held sound): chance alone gets this far.
+    if (bestScore < std::max (0.04, 3.0 / std::sqrt ((double) numFrames)))
+        return 0.0;
+
+    bestPeriod = refine (bestPeriod, step);
+
+    // When the onsets half a beat apart are just as regular as the beats themselves, they are
+    // the beats: an even pulse at 180 is 180, not 90 with something on every offbeat.
+    const double half = bestPeriod * 0.5;
+    if (half >= shortestPeriod * 0.98)
+    {
+        const double halfPeriod = refine (std::max (half, shortestPeriod), 1.0);
+        const size_t nearest = (size_t) std::lround (halfPeriod);
+        double between = 0.0;
+        for (size_t lag = nearest - 1; lag <= nearest + 1; ++lag)
+            between = std::max (between, acf[lag]);
+        if (between / acf[0] > 0.9 * comb (bestPeriod, 2))
+            bestPeriod = halfPeriod;
+    }
+
+    // Loops are nearly always made at a whole tempo: a result this close to one is that tempo.
+    double tempo = frameRate * 60.0 / bestPeriod;
+    if (std::abs (tempo - std::round (tempo)) < tempo * 0.0015)
+        tempo = std::round (tempo);
+    return std::min (std::max (tempo, minTempo), maxTempo);
+}
 }
