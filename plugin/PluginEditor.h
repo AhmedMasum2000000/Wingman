@@ -64,7 +64,8 @@ public:
     int activeSegment = -1;
 
 private:
-    int segmentAt (int x) const;
+    juce::Rectangle<float> cellBounds (int index, int count) const;
+    int segmentAt (juce::Point<int>) const;
     BacklineProcessor& processor;
     int hovered = -1;
 };

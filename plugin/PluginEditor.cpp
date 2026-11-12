@@ -264,21 +264,32 @@ void WaveformView::paint (juce::Graphics& g)
 }
 
 //==============================================================================
-int ChordStrip::segmentAt (int x) const
+// Cards are laid out in rows of up to 16, so long takes stay readable.
+juce::Rectangle<float> ChordStrip::cellBounds (int index, int count) const
+{
+    const int perRow = juce::jmin (count, 16), rows = (count + perRow - 1) / perRow;
+    const float w = (float) getWidth() / (float) perRow, h = (float) getHeight() / (float) rows;
+    return { (float) (index % perRow) * w, (float) (index / perRow) * h, w, h };
+}
+
+int ChordStrip::segmentAt (juce::Point<int> p) const
 {
     const int n = (int) processor.getProgression().size();
-    return n == 0 ? -1 : juce::jlimit (0, n - 1, x * n / juce::jmax (1, getWidth()));
+    for (int i = 0; i < n; ++i)
+        if (cellBounds (i, n).contains (p.toFloat()))
+            return i;
+    return -1;
 }
 
 void ChordStrip::mouseMove (const juce::MouseEvent& e)
 {
-    const int now = segmentAt (e.x);
+    const int now = segmentAt (e.getPosition());
     if (now != hovered) { hovered = now; repaint(); }
 }
 
 void ChordStrip::paint (juce::Graphics& g)
 {
-    const auto& progression = processor.getProgression();
+    const auto progression = processor.getProgression();
     const auto key = processor.getKey();
     if (progression.empty())
     {
@@ -299,53 +310,56 @@ void ChordStrip::paint (juce::Graphics& g)
         return;
     }
 
-    const float width = (float) getWidth() / (float) progression.size();
-    const float gap = progression.size() > 8 ? 2.0f : 4.0f;
-    for (size_t i = 0; i < progression.size(); ++i)
+    const int count = (int) progression.size();
+    const float gap = count > 8 ? 2.0f : 4.0f;
+    for (int i = 0; i < count; ++i)
     {
-        const auto chord = progression[i];
-        const bool active = (int) i == activeSegment, hot = (int) i == hovered;
-        auto cell = juce::Rectangle<float> ((float) i * width, 0.0f, width, (float) getHeight());
-        cell = cell.withTrimmedLeft (i == 0 ? 0.0f : gap).withTrimmedRight (i + 1 == progression.size() ? 0.0f : gap);
+        const auto chord = progression[(size_t) i];
+        const bool active = i == activeSegment, hot = i == hovered;
+        const auto full = cellBounds (i, count);
+        const float width = full.getWidth(), height = full.getHeight();
+        const auto cell = full.reduced (gap * 0.5f, height < (float) getHeight() ? gap * 0.5f : 0.0f);
 
         if (active)
         {
             g.setColour (accent);
-            g.fillRoundedRectangle (cell, 12.0f);
+            g.fillRoundedRectangle (cell, juce::jmin (12.0f, height * 0.25f));
         }
         else
-            drawSurface (g, cell, 12.0f, hot ? accent : border);
+            drawSurface (g, cell, juce::jmin (12.0f, height * 0.25f), hot ? accent : border);
 
         const juce::Colour ink = active ? onAccent : text, soft = active ? onAccent.withAlpha (0.65f) : textDim;
-        auto inner = cell.reduced (juce::jmin (14.0f, width * 0.12f), 12.0f);
-        if (width > 44.0f)
+        auto inner = cell.reduced (juce::jmin (14.0f, width * 0.12f), juce::jmin (12.0f, height * 0.08f));
+        if (width > 44.0f && height > 70.0f)
         {
             const auto top = inner.removeFromTop (16.0f).toNearestInt();
             g.setFont (bodyBold (12.0f));
             g.setColour (soft);
             g.drawText (romanNumeral (chord, key), top, juce::Justification::centredLeft);
             if (width > 70.0f)
-                g.drawText (juce::String ((int) i + 1), top, juce::Justification::centredRight);
+                g.drawText (juce::String (i + 1), top, juce::Justification::centredRight);
         }
-        const float keysHeight = juce::jmin (26.0f, inner.getHeight() * 0.28f);
-        const auto keys = inner.removeFromBottom (keysHeight);
-        if (width > 60.0f)
+        if (width > 60.0f && height > 110.0f)
+        {
+            const float keysHeight = juce::jmin (26.0f, inner.getHeight() * 0.28f);
+            const auto keys = inner.removeFromBottom (keysHeight);
             drawKeyboard (g, keys.withSizeKeepingCentre (juce::jmin (keys.getWidth(), 112.0f), keysHeight), chord,
                           active ? onAccent.withAlpha (0.16f) : border, active ? onAccent.withAlpha (0.30f) : juce::Colour (0xff3a3e45),
                           active ? onAccent : accent, active ? accent : surface);
+        }
 
         g.setColour (ink);
-        g.setFont (display (juce::jlimit (16.0f, 46.0f, width * 0.40f)));
-        g.drawFittedText (chordName (chord), inner.toNearestInt(), juce::Justification::centred, 1);
+        g.setFont (display (juce::jlimit (11.0f, 46.0f, juce::jmin (width * 0.40f, height * 0.55f))));
+        g.drawFittedText (chordName (chord), inner.toNearestInt(), juce::Justification::centred, 1, 0.6f);
     }
 }
 
 void ChordStrip::mouseDown (const juce::MouseEvent& e)
 {
-    const int segment = segmentAt (e.x);
+    const int segment = segmentAt (e.getPosition());
     if (segment < 0)
         return;
-    const auto& progression = processor.getProgression();
+    const auto progression = processor.getProgression();
     const auto alternatives = processor.getAlternatives (segment);
     const auto key = processor.getKey();
     juce::PopupMenu menu;
@@ -355,8 +369,7 @@ void ChordStrip::mouseDown (const juce::MouseEvent& e)
         menu.addItem ((int) i + 1, juce::String (chordName (alternatives[i])) + "    " + romanNumeral (alternatives[i], key),
                       true, alternatives[i] == progression[(size_t) segment]);
 
-    const float width = (float) getWidth() / (float) progression.size();
-    const auto target = localAreaToGlobal (juce::Rectangle<int> ((int) ((float) segment * width), 0, (int) width, getHeight()));
+    const auto target = localAreaToGlobal (cellBounds (segment, (int) progression.size()).toNearestInt());
     juce::Component::SafePointer<ChordStrip> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (target).withMinimumWidth (200),
                         [safe, segment, alternatives] (int result)
@@ -470,8 +483,8 @@ BacklineEditor::BacklineEditor (BacklineProcessor& p)
     tonicBox.onChange = keyChanged;
     modeBox.onChange = keyChanged;
 
-    changeBox.addItem ("Every 2 beats", 2); changeBox.addItem ("Every bar", 4); changeBox.addItem ("Every 2 bars", 8);
-    changeBox.onChange = [this] { processor.setBeatsPerChord ((double) changeBox.getSelectedId()); };
+    changeBox.addItem ("Every half bar", 1); changeBox.addItem ("Every bar", 2); changeBox.addItem ("Every 2 bars", 3);
+    changeBox.onChange = [this] { processor.setChordRate (changeBox.getSelectedId() == 1 ? 0.5 : changeBox.getSelectedId() == 3 ? 2.0 : 1.0); };
 
     chordsTile.rhythm.addItemList ({ "Sustained", "Quarter notes", "Offbeat stabs", "Dotted" }, 1);
     chordsTile.rhythm.onChange = [this] { processor.setChordRhythm ((ChordRhythm) (chordsTile.rhythm.getSelectedId() - 1)); };
@@ -602,23 +615,24 @@ void BacklineEditor::refresh()
         waveform.message = "Recording  " + juce::String (processor.getRecordedSeconds(), 1) + " s";
     else if (armed)
         waveform.message = "Waiting for playback to start";
+    else if (processor.wasLastTakeTooShort())
+        waveform.message = "That take was too short. Record at least one bar.";
     else if (processor.hasCapture())
     {
-        const int bars = juce::roundToInt (processor.getLoopBeats() / 4.0);
+        const int bars = juce::jmax (1, juce::roundToInt (processor.getTakeBeats() / processor.getBeatsPerBar()));
         waveform.facts = { juce::String (bars) + (bars == 1 ? " bar" : " bars"),
                            juce::String (juce::roundToInt (processor.getBpm())) + " BPM", keyName (processor.getKey()) };
     }
     else if (processor.hasProgression())
         waveform.message = "Progression restored. Record again for new ideas.";
-    else if (processor.getRecordedSeconds() > 0.0)
-        waveform.message = "That take was too short. Record at least one bar.";
     else
         waveform.message = "Put Backline on the track you want to build around.";
 
     const auto key = processor.getKey();
     tonicBox.setSelectedId (key.tonic + 1, juce::dontSendNotification);
     modeBox.setSelectedId (key.minor ? 2 : 1, juce::dontSendNotification);
-    changeBox.setSelectedId ((int) processor.getBeatsPerChord(), juce::dontSendNotification);
+    const double rate = processor.getChordRate();
+    changeBox.setSelectedId (rate < 0.75 ? 1 : rate > 1.5 ? 3 : 2, juce::dontSendNotification);
     chordsTile.rhythm.setSelectedId ((int) processor.getChordRhythm() + 1, juce::dontSendNotification);
     bassTile.rhythm.setSelectedId ((int) processor.getBassRhythm() + 1, juce::dontSendNotification);
     previewButton.setToggleState (processor.previewEnabled.load(), juce::dontSendNotification);

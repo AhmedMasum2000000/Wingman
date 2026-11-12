@@ -91,18 +91,16 @@ BacklineProcessor::~BacklineProcessor() { stopTimer(); }
 void BacklineProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
-    // Hosts call this often (some on every transport start), so keep an existing take.
-    const auto needed = (size_t) (sampleRate * maxCaptureSeconds);
-    if (! recording.load() && capture.size() != needed)
-    {
-        capture.assign (needed, 0.0f);
-        capturedSamples = 0;
-    }
+    // Hosts call this often (some on every transport start) and with changing sample rates.
+    // The take buffer is only allocated here the first time; an existing take is never touched.
+    if (capture.empty())
+        capture.assign ((size_t) (sampleRate * maxCaptureSeconds), 0.0f);
     chordSynth.setCurrentPlaybackSampleRate (sampleRate);
     bassSynth.setCurrentPlaybackSampleRate (sampleRate);
     synthBuffer.setSize (2, samplesPerBlock);
     chordMidi.ensureSize (4096);
     bassMidi.ensureSize (4096);
+    haltPreviewAndTake();
 }
 
 bool BacklineProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -112,18 +110,43 @@ bool BacklineProcessor::isBusesLayoutSupported (const BusesLayout& layouts) cons
         && layouts.getMainInputChannelSet() == out;
 }
 
-void BacklineProcessor::scheduleNotes (const std::vector<Note>& notes, juce::MidiBuffer& midi, double startBeat,
-                                       double blockBeats, double loopBeats, int numSamples) const
+// Stops everything that depends on blocks arriving continuously (bypass, suspend, re-prepare).
+void BacklineProcessor::haltPreviewAndTake()
 {
+    chordSynth.allNotesOff (0, false);
+    bassSynth.allNotesOff (0, false);
+    wasPlaying = false;
+    nextBeat = -1.0;
+    playheadBeats = -1.0;
+    if (recording.exchange (false))
+    {
+        recordArmed = false;
+        analysisPending = true;
+    }
+}
+
+void BacklineProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+{
+    haltPreviewAndTake();
+    juce::AudioProcessor::processBlockBypassed (buffer, midi);
+}
+
+// Sends the note events that fall in the block [blockStart, blockEnd) of a loop. Consecutive
+// blocks must pass the previous blockEnd as their blockStart, so every event is sent exactly once
+// even when it lands precisely on a block boundary.
+void BacklineProcessor::scheduleNotes (const std::vector<Note>& notes, juce::MidiBuffer& midi, double blockStart,
+                                       double blockEnd, double loopBeats, int numSamples)
+{
+    if (blockStart == blockEnd || loopBeats <= 0.0 || numSamples <= 0)
+        return;
+    const double span = positiveMod (blockEnd - blockStart, loopBeats);
     auto offsetFor = [&] (double beat, int& offset)
     {
-        for (double candidate : { beat, beat + loopBeats })
-            if (candidate >= startBeat && candidate < startBeat + blockBeats)
-            {
-                offset = juce::jlimit (0, numSamples - 1, (int) ((candidate - startBeat) / blockBeats * numSamples));
-                return true;
-            }
-        return false;
+        const bool inside = blockStart < blockEnd ? (beat >= blockStart && beat < blockEnd)
+                                                  : (beat >= blockStart || beat < blockEnd);
+        if (inside)
+            offset = juce::jlimit (0, numSamples - 1, (int) (positiveMod (beat - blockStart, loopBeats) / span * numSamples));
+        return inside;
     };
 
     int offset = 0;
@@ -131,7 +154,7 @@ void BacklineProcessor::scheduleNotes (const std::vector<Note>& notes, juce::Mid
         if (offsetFor (std::min (n.start + n.length, loopBeats - 0.001), offset))
             midi.addEvent (juce::MidiMessage::noteOff (1, n.pitch), offset);
     for (const auto& n : notes)
-        if (offsetFor (n.start, offset))
+        if (n.start < loopBeats && offsetFor (n.start, offset))
             midi.addEvent (juce::MidiMessage::noteOn (1, n.pitch, (juce::uint8) n.velocity), offset);
 }
 
@@ -141,50 +164,84 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const int numSamples = buffer.getNumSamples(), numChannels = buffer.getNumChannels();
     for (int ch = getTotalNumInputChannels(); ch < numChannels; ++ch)
         buffer.clear (ch, 0, numSamples);
+    if (numSamples <= 0)
+        return;
+    const double sampleRate = currentSampleRate.load();
 
-    // Transport: use the host's when there is one, otherwise a free-running clock (standalone).
+    // Transport: the host's when it provides musical time, otherwise a free-running clock.
+    // (The standalone app and some simple hosts supply a playhead with no tempo or position.)
     double hostBpm = 120.0, ppq = internalPpq, beatsPerBar = 4.0, barStart = 0.0;
-    bool playing = true, hasBarStart = false;
+    bool playing = true, hasBarStart = false, hostTransport = false;
     if (auto* hostPlayHead = getPlayHead())
         if (auto position = hostPlayHead->getPosition())
-        {
-            playing = position->getIsPlaying();
-            if (auto b = position->getBpm()) hostBpm = *b;
-            if (auto p = position->getPpqPosition()) ppq = *p;
-            if (auto sig = position->getTimeSignature())
-                beatsPerBar = juce::jmax (1.0, sig->numerator * 4.0 / juce::jmax (1, sig->denominator));
-            if (auto b = position->getPpqPositionOfLastBarStart()) { barStart = *b; hasBarStart = true; }
-        }
-    const double blockBeats = numSamples * hostBpm / (60.0 * currentSampleRate);
+            if (position->getPpqPosition().hasValue() || position->getBpm().hasValue())
+            {
+                hostTransport = true;
+                playing = position->getIsPlaying();
+                if (auto b = position->getBpm()) hostBpm = juce::jlimit (20.0, 999.0, *b);
+                if (auto p = position->getPpqPosition()) ppq = *p;
+                if (auto sig = position->getTimeSignature())
+                    beatsPerBar = juce::jmax (1.0, sig->numerator * 4.0 / juce::jmax (1, sig->denominator));
+                if (auto b = position->getPpqPositionOfLastBarStart()) { barStart = *b; hasBarStart = true; }
+            }
+    const double blockBeats = numSamples * hostBpm / (60.0 * sampleRate);
     internalPpq += blockBeats;
 
     // Capture the incoming audio (mono mix) while armed and the transport is running.
     if (recording.load() || recordArmed.load())
     {
-        if (! recording.load() && playing && ! capture.empty())
+        auto startTake = [&]
         {
             // Recording may start mid-bar; remember how far it is to the next bar line.
-            const double intoBar = hasBarStart ? ppq - barStart : positiveMod (ppq, beatsPerBar);
-            captureSkipBeats = (intoBar < 0.05 || intoBar > beatsPerBar) ? 0.0 : beatsPerBar - intoBar;
+            const double intoBar = positiveMod (hasBarStart ? ppq - barStart : ppq, beatsPerBar);
+            captureSkipBeats = (! hostTransport || intoBar < 0.05) ? 0.0 : beatsPerBar - intoBar;
             capturedSamples = 0;
             captureStartPpq = ppq;
             captureBpm = hostBpm;
+            captureBeatsPerBar = beatsPerBar;
+            captureSampleRate = sampleRate;
+            expectedRecordPpq = ppq;
             recording = true;
-        }
+        };
+
+        if (! recording.load() && playing && ! capture.empty())
+            startTake();
+
         if (recording.load())
         {
-            int count = capturedSamples.load();
-            const int room = (int) capture.size() - count;
-            const int toCopy = (recordArmed.load() && playing) ? juce::jmin (numSamples, room) : 0;
-            for (int i = 0; i < toCopy; ++i)
+            bool finish = ! recordArmed.load() || ! playing;
+
+            // The take must map linearly onto the timeline: a loop wrap, a seek or a tempo change ends it
+            // (or restarts it, if there is not yet a bar's worth of audio).
+            const bool jumped = hostTransport && (std::abs (ppq - expectedRecordPpq) > std::max (0.01, 0.5 * blockBeats)
+                                                  || std::abs (hostBpm - captureBpm.load()) > 0.01);
+            if (! finish && jumped)
             {
-                float mix = 0.0f;
-                for (int ch = 0; ch < getTotalNumInputChannels() && ch < numChannels; ++ch)
-                    mix += buffer.getSample (ch, i);
-                capture[(size_t) (count + i)] = mix / (float) juce::jmax (1, getTotalNumInputChannels());
+                const double beatsSoFar = capturedSamples.load() / sampleRate * captureBpm.load() / 60.0 - captureSkipBeats.load();
+                if (beatsSoFar >= captureBeatsPerBar.load())
+                    finish = true;
+                else
+                    startTake();
             }
-            capturedSamples = count + toCopy;
-            if (toCopy < numSamples) // stopped, disarmed or buffer full
+
+            if (! finish)
+            {
+                const int count = capturedSamples.load();
+                const int toCopy = juce::jmin (numSamples, (int) capture.size() - count);
+                const int inputs = juce::jmin (getTotalNumInputChannels(), numChannels);
+                for (int i = 0; i < toCopy; ++i)
+                {
+                    float mix = 0.0f;
+                    for (int ch = 0; ch < inputs; ++ch)
+                        mix += buffer.getSample (ch, i);
+                    capture[(size_t) (count + i)] = mix / (float) juce::jmax (1, inputs);
+                }
+                capturedSamples = count + toCopy;
+                expectedRecordPpq = ppq + blockBeats;
+                finish = toCopy < numSamples; // buffer full
+            }
+
+            if (finish)
             {
                 recordArmed = false;
                 recording = false;
@@ -193,17 +250,18 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         }
     }
 
-    // Preview the generated chords and bass in time with the transport.
+    // Pick up a newly published progression. The old one is handed back for the message thread to free.
     {
         const juce::SpinLock::ScopedTryLockType lock (playbackLock);
-        if (lock.isLocked() && activePlayback != pendingPlayback)
+        if (lock.isLocked() && activePlayback != pendingPlayback && releasedPlayback == nullptr)
         {
+            releasedPlayback = std::move (activePlayback);
             activePlayback = pendingPlayback;
-            chordSynth.allNotesOff (0, true);
-            bassSynth.allNotesOff (0, true);
+            nextBeat = -1.0; // restart the notes from the current position
         }
     }
 
+    // Preview the generated chords and bass in time with the transport.
     chordMidi.clear();
     bassMidi.clear();
     const bool hasLoop = playing && activePlayback != nullptr && activePlayback->lengthBeats > 0.0;
@@ -213,13 +271,43 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const bool shouldPlay = hasLoop && previewEnabled.load();
     if (shouldPlay)
     {
-        scheduleNotes (activePlayback->chords, chordMidi, startBeat, blockBeats, loop, numSamples);
-        scheduleNotes (activePlayback->bass, bassMidi, startBeat, blockBeats, loop, numSamples);
+        // Continuous playback carries on from where the last block ended. Anything else (start, seek,
+        // host loop wrap, edited progression) silences what is sounding and re-enters at the new position.
+        bool restart = ! wasPlaying || nextBeat < 0.0;
+        if (! restart)
+        {
+            double gap = std::abs (startBeat - nextBeat);
+            gap = std::min (gap, std::abs (loop - gap));
+            restart = gap > std::max (1.0e-3, 0.25 * blockBeats);
+        }
+        const double blockStart = restart ? startBeat : nextBeat;
+        const double blockEnd = positiveMod (startBeat + blockBeats, loop);
+
+        if (restart)
+        {
+            chordSynth.allNotesOff (0, true);
+            bassSynth.allNotesOff (0, true);
+            auto chase = [blockStart, loop] (const std::vector<Note>& notes, juce::MidiBuffer& midi)
+            {
+                for (const auto& n : notes) // notes already under way at this position
+                    if (n.start < blockStart && blockStart < std::min (n.start + n.length, loop - 0.001))
+                        midi.addEvent (juce::MidiMessage::noteOn (1, n.pitch, (juce::uint8) n.velocity), 0);
+            };
+            chase (activePlayback->chords, chordMidi);
+            chase (activePlayback->bass, bassMidi);
+        }
+        scheduleNotes (activePlayback->chords, chordMidi, blockStart, blockEnd, loop, numSamples);
+        scheduleNotes (activePlayback->bass, bassMidi, blockStart, blockEnd, loop, numSamples);
+        nextBeat = blockEnd;
     }
-    else if (wasPlaying)
+    else
     {
-        chordSynth.allNotesOff (0, true);
-        bassSynth.allNotesOff (0, true);
+        if (wasPlaying)
+        {
+            chordSynth.allNotesOff (0, true);
+            bassSynth.allNotesOff (0, true);
+        }
+        nextBeat = -1.0;
     }
     wasPlaying = shouldPlay;
 
@@ -235,39 +323,80 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 }
 
 //==============================================================================
-void BacklineProcessor::setRecordArmed (bool shouldRecord) { recordArmed = shouldRecord; }
+// Session. Everything below takes stateLock, because hosts may save and restore state from
+// threads other than the message thread.
 
-double BacklineProcessor::getRecordedSeconds() const { return capturedSamples.load() / currentSampleRate; }
+void BacklineProcessor::setRecordArmed (bool shouldRecord)
+{
+    if (shouldRecord && ! recording.load())
+    {
+        // If the sample rate changed since the buffer was made, resize it before the take starts.
+        const auto needed = (size_t) (currentSampleRate.load() * maxCaptureSeconds);
+        if (capture.size() != needed)
+        {
+            capture.assign (needed, 0.0f);
+            capturedSamples = 0;
+        }
+    }
+    recordArmed = shouldRecord;
+}
+
+double BacklineProcessor::getRecordedSeconds() const { return capturedSamples.load() / captureSampleRate.load(); }
 
 void BacklineProcessor::timerCallback()
 {
+    std::shared_ptr<const Playback> garbage;
+    {
+        const juce::SpinLock::ScopedLockType lock (playbackLock);
+        garbage = std::move (releasedPlayback);
+    }
     if (analysisPending.exchange (false))
         analyseCapture();
 }
 
 void BacklineProcessor::analyseCapture()
 {
-    const auto total = (size_t) capturedSamples.load();
-    bpm = captureBpm.load();
-    const double samplesPerBeat = currentSampleRate * 60.0 / bpm;
+    const auto total = (size_t) juce::jmin (capturedSamples.load(), (int) capture.size());
+    const double sampleRate = captureSampleRate.load(), newBpm = captureBpm.load(), bar = captureBeatsPerBar.load();
+    const double samplesPerBeat = sampleRate * 60.0 / newBpm;
 
     // Start on the first bar line, unless that would leave less than a bar of audio.
     double skipBeats = captureSkipBeats.load();
-    if ((double) total - skipBeats * samplesPerBeat < 4.0 * samplesPerBeat)
+    if ((double) total - skipBeats * samplesPerBeat < bar * samplesPerBeat)
         skipBeats = 0.0;
-    analysisOffset = (int) (skipBeats * samplesPerBeat);
-    const auto count = total - (size_t) analysisOffset;
-    const float* audio = capture.data() + analysisOffset;
+    const int offset = (int) (skipBeats * samplesPerBeat);
+    const auto count = total - (size_t) offset;
+    const float* audio = capture.data() + offset;
+    const double beats = (double) count / samplesPerBeat;
 
-    originPpq = captureStartPpq.load() + skipBeats;
-    totalBeats = (double) count / samplesPerBeat;
-    chroma = computeChroma (audio, count, currentSampleRate);
-    melodyNotes = audioToNotes (audio, count, currentSampleRate, bpm);
-    if (chroma.frames.empty())
+    ChromaFrames newChroma;
+    std::vector<Note> newMelody;
+    if (beats >= bar)
     {
-        ++revision;
+        newChroma = computeChroma (audio, count, sampleRate);
+        newMelody = audioToNotes (audio, count, sampleRate, newBpm);
+    }
+
+    const juce::ScopedLock lock (stateLock);
+    if (newChroma.frames.empty())
+    {
+        // The buffer no longer holds the previous take, so drop its analysis but keep the progression.
+        lastTakeTooShort = true;
+        chroma = {};
+        segments.clear();
+        ideas.clear();
+        melodyNotes.clear();
+        updatePlayback();
         return;
     }
+    lastTakeTooShort = false;
+    bpm = newBpm;
+    beatsPerBar = bar;
+    analysisOffset = offset;
+    originPpq = captureStartPpq.load() + skipBeats;
+    totalBeats = beats;
+    chroma = std::move (newChroma);
+    melodyNotes = std::move (newMelody);
     key = detectKey (chroma);
     rebuildIdeas();
 }
@@ -275,27 +404,44 @@ void BacklineProcessor::analyseCapture()
 void BacklineProcessor::rebuildIdeas()
 {
     if (chroma.frames.empty())
+    {
+        updatePlayback();
         return;
-    const int numSegments = juce::jmax (1, juce::roundToInt (totalBeats / beatsPerChord));
+    }
+    const double beatsPerChord = getBeatsPerChord();
+    const int numSegments = juce::jlimit (1, maxChords, juce::roundToInt (totalBeats / beatsPerChord));
     segments = segmentChroma (chroma, bpm, beatsPerChord, numSegments);
     ideas = suggestProgressions (segments, key, 4);
-    selectIdea (0);
+    selectedIdea = 0;
+    if (! ideas.empty())
+        progression = ideas.front();
+    updatePlayback();
 }
+
+bool BacklineProcessor::hasProgression() const { const juce::ScopedLock lock (stateLock); return ! progression.empty(); }
+bool BacklineProcessor::hasCapture() const     { const juce::ScopedLock lock (stateLock); return ! segments.empty(); }
+Key BacklineProcessor::getKey() const          { const juce::ScopedLock lock (stateLock); return key; }
+int BacklineProcessor::getNumIdeas() const     { const juce::ScopedLock lock (stateLock); return (int) ideas.size(); }
+std::vector<Chord> BacklineProcessor::getProgression() const { const juce::ScopedLock lock (stateLock); return progression; }
+double BacklineProcessor::getLoopBeats() const { const juce::ScopedLock lock (stateLock); return (double) progression.size() * getBeatsPerChord(); }
 
 void BacklineProcessor::setKey (Key newKey)
 {
+    const juce::ScopedLock lock (stateLock);
     key = newKey;
-    if (hasCapture()) rebuildIdeas(); else updatePlayback();
+    rebuildIdeas();
 }
 
-void BacklineProcessor::setBeatsPerChord (double beats)
+void BacklineProcessor::setChordRate (double barsPerChord)
 {
-    beatsPerChord = beats;
-    if (hasCapture()) rebuildIdeas(); else updatePlayback();
+    const juce::ScopedLock lock (stateLock);
+    chordRate = barsPerChord <= 0.75 ? 0.5 : barsPerChord < 1.5 ? 1.0 : 2.0;
+    rebuildIdeas();
 }
 
 void BacklineProcessor::selectIdea (int index)
 {
+    const juce::ScopedLock lock (stateLock);
     if (index >= 0 && index < (int) ideas.size())
     {
         selectedIdea = index;
@@ -306,6 +452,7 @@ void BacklineProcessor::selectIdea (int index)
 
 std::vector<Chord> BacklineProcessor::getAlternatives (int segment) const
 {
+    const juce::ScopedLock lock (stateLock);
     if (segment >= 0 && segment < (int) segments.size())
         return rankChords (segments[(size_t) segment], key);
     return chordsInKey (key);
@@ -313,6 +460,7 @@ std::vector<Chord> BacklineProcessor::getAlternatives (int segment) const
 
 void BacklineProcessor::setChord (int segment, Chord chord)
 {
+    const juce::ScopedLock lock (stateLock);
     if (segment >= 0 && segment < (int) progression.size())
     {
         progression[(size_t) segment] = chord;
@@ -320,41 +468,62 @@ void BacklineProcessor::setChord (int segment, Chord chord)
     }
 }
 
+void BacklineProcessor::setChordRhythm (ChordRhythm r) { const juce::ScopedLock lock (stateLock); chordRhythm = r; updatePlayback(); }
+void BacklineProcessor::setBassRhythm (BassRhythm r)   { const juce::ScopedLock lock (stateLock); bassRhythm = r; updatePlayback(); }
+
 void BacklineProcessor::updatePlayback()
 {
+    const juce::ScopedLock stateGuard (stateLock);
     auto playback = std::make_shared<Playback>();
-    playback->chords = renderChords (progression, beatsPerChord, chordRhythm);
-    playback->bass = renderBass (progression, beatsPerChord, bassRhythm);
-    playback->lengthBeats = (double) progression.size() * beatsPerChord;
+    playback->chords = renderChords (progression, getBeatsPerChord(), chordRhythm);
+    playback->bass = renderBass (progression, getBeatsPerChord(), bassRhythm);
+    playback->lengthBeats = (double) progression.size() * getBeatsPerChord();
     playback->originPpq = originPpq;
+
+    std::shared_ptr<const Playback> old, garbage; // freed here, never on the audio thread
     {
         const juce::SpinLock::ScopedLockType lock (playbackLock);
-        retiredPlayback = pendingPlayback; // keep the old one alive so the audio thread never frees it
-        pendingPlayback = playback;
+        garbage = std::move (releasedPlayback);
+        old = std::move (pendingPlayback);
+        pendingPlayback = std::move (playback);
     }
     ++revision;
 }
 
 std::vector<Note> BacklineProcessor::getPartNotes (Part part) const
 {
+    const juce::ScopedLock lock (stateLock);
     switch (part)
     {
-        case Part::Chords: return renderChords (progression, beatsPerChord, chordRhythm);
-        case Part::Bass:   return renderBass (progression, beatsPerChord, bassRhythm);
+        case Part::Chords: return renderChords (progression, getBeatsPerChord(), chordRhythm);
+        case Part::Bass:   return renderBass (progression, getBeatsPerChord(), bassRhythm);
         case Part::Melody: break;
     }
-    return hasCapture() ? melodyNotes : std::vector<Note>();
+    return segments.empty() ? std::vector<Note>() : melodyNotes;
 }
 
 std::vector<float> BacklineProcessor::getWaveform (int numPoints) const
 {
     // Samples below capturedSamples are never rewritten during a take, so this is safe to read live.
     std::vector<float> peaks ((size_t) juce::jmax (0, numPoints), 0.0f);
-    const int offset = recording.load() ? 0 : analysisOffset;
+    const bool live = recording.load();
+    int offset = 0;
+    double span = 0.0; // samples shown across the full width
+    {
+        const juce::ScopedLock lock (stateLock);
+        if (! live && ! segments.empty())
+        {
+            // After analysis the picture uses the same axis as the chords: one loop, starting on the bar line.
+            offset = analysisOffset;
+            span = getLoopBeats() * 60.0 / bpm * captureSampleRate.load();
+        }
+    }
     const int count = juce::jmin (capturedSamples.load(), (int) capture.size()) - offset;
-    if (count <= 0 || numPoints <= 0)
+    if (span <= 0.0)
+        span = (double) count;
+    if (count <= 0 || numPoints <= 0 || span <= 0.0)
         return peaks;
-    const double perPoint = (double) count / numPoints;
+    const double perPoint = span / numPoints;
     const int stride = juce::jmax (1, (int) (perPoint / 48.0));
     for (int i = 0; i < numPoints; ++i)
     {
@@ -374,8 +543,12 @@ juce::File BacklineProcessor::writeMidiFile (Part part)
                             : part == Part::Bass   ? "Backline Bass" : "Backline Audio to MIDI";
     if (notes.empty())
         return {};
-    const auto bytes = backline::writeMidiFile (notes, bpm);
-    auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile (name + ".mid");
+    const auto bytes = backline::writeMidiFile (notes, getBpm());
+    // One folder per plugin instance, so two instances never overwrite each other's file mid-drag.
+    auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                      .getChildFile ("Backline").getChildFile (juce::String::toHexString ((juce::pointer_sized_int) this));
+    folder.createDirectory();
+    auto file = folder.getChildFile (name + ".mid");
     return file.replaceWithData (bytes.data(), bytes.size()) ? file : juce::File();
 }
 
@@ -383,19 +556,23 @@ juce::File BacklineProcessor::writeMidiFile (Part part)
 void BacklineProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     juce::XmlElement xml ("Backline");
-    xml.setAttribute ("tonic", key.tonic);
-    xml.setAttribute ("minor", key.minor);
-    xml.setAttribute ("bpm", bpm);
-    xml.setAttribute ("origin", originPpq);
-    xml.setAttribute ("beatsPerChord", beatsPerChord);
-    xml.setAttribute ("chordRhythm", (int) chordRhythm);
-    xml.setAttribute ("bassRhythm", (int) bassRhythm);
+    {
+        const juce::ScopedLock lock (stateLock);
+        xml.setAttribute ("tonic", key.tonic);
+        xml.setAttribute ("minor", key.minor);
+        xml.setAttribute ("bpm", bpm);
+        xml.setAttribute ("origin", originPpq);
+        xml.setAttribute ("beatsPerBar", beatsPerBar);
+        xml.setAttribute ("chordRate", chordRate);
+        xml.setAttribute ("chordRhythm", (int) chordRhythm);
+        xml.setAttribute ("bassRhythm", (int) bassRhythm);
+        juce::StringArray chords;
+        for (auto c : progression)
+            chords.add (juce::String (c.root) + (c.quality == Quality::Minor ? "m" : "M"));
+        xml.setAttribute ("progression", chords.joinIntoString (" "));
+    }
     xml.setAttribute ("preview", previewEnabled.load());
     xml.setAttribute ("gain", (double) previewGain.load());
-    juce::StringArray chords;
-    for (auto c : progression)
-        chords.add (juce::String (c.root) + (c.quality == Quality::Minor ? "m" : "M"));
-    xml.setAttribute ("progression", chords.joinIntoString (" "));
     copyXmlToBinary (xml, destData);
 }
 
@@ -404,15 +581,19 @@ void BacklineProcessor::setStateInformation (const void* data, int sizeInBytes)
     const auto xml = getXmlFromBinary (data, sizeInBytes);
     if (xml == nullptr || ! xml->hasTagName ("Backline"))
         return;
-    key.tonic = juce::jlimit (0, 11, xml->getIntAttribute ("tonic"));
-    key.minor = xml->getBoolAttribute ("minor");
-    bpm = juce::jmax (1.0, xml->getDoubleAttribute ("bpm", 120.0));
-    originPpq = xml->getDoubleAttribute ("origin");
-    beatsPerChord = juce::jlimit (1.0, 16.0, xml->getDoubleAttribute ("beatsPerChord", 4.0));
-    chordRhythm = (ChordRhythm) juce::jlimit (0, 3, xml->getIntAttribute ("chordRhythm"));
-    bassRhythm = (BassRhythm) juce::jlimit (0, 4, xml->getIntAttribute ("bassRhythm", 1));
     previewEnabled = xml->getBoolAttribute ("preview", true);
     previewGain = (float) juce::jlimit (0.0, 1.0, xml->getDoubleAttribute ("gain", 0.7));
+
+    const juce::ScopedLock lock (stateLock);
+    key.tonic = juce::jlimit (0, 11, xml->getIntAttribute ("tonic"));
+    key.minor = xml->getBoolAttribute ("minor");
+    bpm = juce::jlimit (20.0, 999.0, xml->getDoubleAttribute ("bpm", 120.0));
+    originPpq = xml->getDoubleAttribute ("origin");
+    beatsPerBar = juce::jlimit (1.0, 32.0, xml->getDoubleAttribute ("beatsPerBar", 4.0));
+    const double rate = xml->getDoubleAttribute ("chordRate", xml->getDoubleAttribute ("beatsPerChord", 4.0) / 4.0);
+    chordRate = rate <= 0.75 ? 0.5 : rate < 1.5 ? 1.0 : 2.0;
+    chordRhythm = (ChordRhythm) juce::jlimit (0, 3, xml->getIntAttribute ("chordRhythm"));
+    bassRhythm = (BassRhythm) juce::jlimit (0, 4, xml->getIntAttribute ("bassRhythm", 1));
 
     // The captured audio is not stored in the session, only the chosen progression.
     chroma = {};
@@ -420,8 +601,9 @@ void BacklineProcessor::setStateInformation (const void* data, int sizeInBytes)
     segments.clear();
     ideas.clear();
     progression.clear();
+    lastTakeTooShort = false;
     for (const auto& token : juce::StringArray::fromTokens (xml->getStringAttribute ("progression"), " ", ""))
-        if (token.isNotEmpty())
+        if (token.isNotEmpty() && (int) progression.size() < maxChords)
             progression.push_back ({ juce::jlimit (0, 11, token.getIntValue()),
                                      token.endsWithChar ('m') ? Quality::Minor : Quality::Major });
     updatePlayback();

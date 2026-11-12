@@ -8,7 +8,8 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = ([Security.Principal.WindowsPrincipal] $identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     Write-Host 'Asking for administrator rights (needed to write to the VST3 folder)...'
-    $again = "irm $base/install.ps1 | iex; Read-Host 'Press Enter to close'"
+    # Keep the elevated window open whatever happens, so an error is never mistaken for success.
+    $again = "try { irm $base/install.ps1 | iex } catch { Write-Host `$_ -ForegroundColor Red } finally { Read-Host 'Press Enter to close' }"
     Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $again
     return
 }
@@ -30,7 +31,10 @@ Expand-Archive -Path $zip -DestinationPath $work -Force
 $vstFolder = Join-Path $env:CommonProgramFiles 'VST3'
 New-Item -ItemType Directory -Path $vstFolder -Force | Out-Null
 $target = Join-Path $vstFolder 'Backline.vst3'
-if (Test-Path $target) { Remove-Item $target -Recurse -Force }
+if (Test-Path $target) {
+    try { Remove-Item $target -Recurse -Force }
+    catch { Write-Host 'Backline is in use. Close your DAW and run the installer again.' -ForegroundColor Red; throw }
+}
 Copy-Item (Join-Path $work 'Backline\Backline.vst3') $vstFolder -Recurse -Force
 
 $appFolder = Join-Path $env:ProgramFiles 'Backline'

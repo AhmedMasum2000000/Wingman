@@ -55,6 +55,17 @@ jobs:
           if (-not (Test-Path (Join-Path $env:ProgramFiles 'Backline\Backline.exe'))) { throw 'Standalone app was not installed' }
           Write-Host 'Install script works.'
 
+      - name: Test Install.bat from a folder with spaces
+        shell: pwsh
+        run: |
+          $plugin = Join-Path $env:CommonProgramFiles 'VST3\Backline.vst3'
+          Remove-Item $plugin -Recurse -Force
+          $folder = Join-Path $PWD 'unzip test (1)'
+          Expand-Archive Backline-Windows.zip -DestinationPath $folder
+          cmd /c "`"$folder\Backline\Install.bat`" < NUL"
+          if (-not (Test-Path (Join-Path $plugin 'Contents\x86_64-win\Backline.vst3'))) { throw 'Install.bat did not install the plugin' }
+          Write-Host 'Install.bat works.'
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
