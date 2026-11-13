@@ -1,4 +1,5 @@
 #include "Backline.h"
+#include "Random.h"
 #include <algorithm>
 #include <cmath>
 
@@ -77,6 +78,11 @@ std::string qualitySuffix (Quality quality)
         case Quality::Sus2:       return "sus2";
         case Quality::Sus4:       return "sus4";
         case Quality::Diminished: return "dim";
+        case Quality::Add9:       return "add9";
+        case Quality::MinorAdd9:  return "madd9";
+        case Quality::Major9:     return "maj9";
+        case Quality::Minor9:     return "m9";
+        case Quality::Dominant9:  return "9";
     }
     return "";
 }
@@ -114,6 +120,11 @@ std::vector<int> chordIntervals (Quality quality)
         case Quality::Sus2:       return { 0, 2, 7 };
         case Quality::Sus4:       return { 0, 5, 7 };
         case Quality::Diminished: return { 0, 3, 6 };
+        case Quality::Add9:       return { 0, 4, 7, 14 };
+        case Quality::MinorAdd9:  return { 0, 3, 7, 14 };
+        case Quality::Major9:     return { 0, 4, 7, 11, 14 };
+        case Quality::Minor9:     return { 0, 3, 7, 10, 14 };
+        case Quality::Dominant9:  return { 0, 4, 7, 10, 14 };
     }
     return { 0, 4, 7 };
 }
@@ -128,12 +139,14 @@ std::vector<int> chordPitchClasses (Chord chord)
 
 bool hasSeventh (Quality quality)
 {
-    return quality == Quality::Dominant7 || quality == Quality::Major7 || quality == Quality::Minor7;
+    return quality == Quality::Dominant7 || quality == Quality::Major7 || quality == Quality::Minor7
+        || quality == Quality::Major9 || quality == Quality::Minor9 || quality == Quality::Dominant9;
 }
 
 bool hasMinorThird (Quality quality)
 {
-    return quality == Quality::Minor || quality == Quality::Minor7 || quality == Quality::Diminished;
+    return quality == Quality::Minor || quality == Quality::Minor7 || quality == Quality::Diminished
+        || quality == Quality::MinorAdd9 || quality == Quality::Minor9;
 }
 
 bool isInScale (int pitchClass, Key key)
@@ -249,6 +262,20 @@ std::vector<std::vector<Chord>> suggestProgressions (const std::vector<Chroma>& 
         }
     }
     return ideas;
+}
+
+std::vector<std::vector<Chord>> suggestProgressions (const std::vector<Chroma>& segments, Key key, int count, std::uint32_t seed)
+{
+    if (seed == 0)
+        return suggestProgressions (segments, key, count);
+    auto heard = segments;
+    for (size_t s = 0; s < heard.size(); ++s)
+    {
+        Random random (mixSeed (seed, s));
+        for (auto& v : heard[s])
+            v *= (float) (0.55 + 0.9 * random.uniform());
+    }
+    return suggestProgressions (heard, key, count);
 }
 
 // ---- Progressions ---------------------------------------------------------------------------
@@ -487,7 +514,7 @@ std::vector<Chord> chordVariations (Chord chord, Key key)
             variations.push_back (c);
     };
 
-    for (int q = 0; q < numQualities; ++q)
+    for (int q = 0; q < numBasicQualities; ++q)
     {
         const Chord candidate { root, (Quality) q, -1, chord.sharpRoot };
         bool fits = true;
@@ -537,9 +564,10 @@ Progression withSevenths (const Progression& progression, Key key)
 Chord triadChord (Chord chord)
 {
     Chord result = chord;
-    if (chord.quality == Quality::Dominant7 || chord.quality == Quality::Major7)
+    if (chord.quality == Quality::Dominant7 || chord.quality == Quality::Major7 || chord.quality == Quality::Add9
+        || chord.quality == Quality::Major9 || chord.quality == Quality::Dominant9)
         result.quality = Quality::Major;
-    else if (chord.quality == Quality::Minor7)
+    else if (chord.quality == Quality::Minor7 || chord.quality == Quality::MinorAdd9 || chord.quality == Quality::Minor9)
         result.quality = Quality::Minor;
     // A 7th in the bass has nothing to stand on once the 7th is gone.
     if (result.quality != chord.quality && chord.bass >= 0)

@@ -10,7 +10,8 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>") # no VC+
 option(BACKLINE_BUILD_PLUGIN "Build the JUCE plugin (downloads JUCE)" ON)
 
 add_library(backline_core STATIC
-    core/Analysis.cpp core/Harmony.cpp core/Parts.cpp core/MidiFile.cpp)
+    core/Analysis.cpp core/Harmony.cpp core/Parts.cpp core/MidiFile.cpp
+    core/Timing.cpp core/Variation.cpp core/Patterns.cpp)
 target_include_directories(backline_core PUBLIC core)
 set_target_properties(backline_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -18,6 +19,9 @@ enable_testing()
 add_executable(backline_tests tests/CoreTests.cpp)
 target_link_libraries(backline_tests PRIVATE backline_core)
 add_test(NAME core COMMAND backline_tests)
+add_executable(backline_engine_tests tests/EngineTests.cpp)
+target_link_libraries(backline_engine_tests PRIVATE backline_core)
+add_test(NAME engine COMMAND backline_engine_tests)
 
 if(BACKLINE_BUILD_PLUGIN)
     include(FetchContent)

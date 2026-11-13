@@ -103,6 +103,11 @@ juce::String romanNumeral (Chord chord, Key key)
         case Quality::Sus2:       return n + "sus2";
         case Quality::Sus4:       return n + "sus4";
         case Quality::Diminished: return n + juce::String (juce::CharPointer_UTF8 ("\xc2\xb0"));
+        case Quality::Add9:
+        case Quality::MinorAdd9:  return n + "add9";
+        case Quality::Major9:     return n + "maj9";
+        case Quality::Minor9:
+        case Quality::Dominant9:  return n + "9";
         case Quality::Major:
         case Quality::Minor:      break;
     }

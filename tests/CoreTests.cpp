@@ -453,11 +453,14 @@ int main()
     {
         const Key cMajor { 0, false, 1.0f }, eMajor { 4, false, 1.0f }, fMinor { 5, true, 1.0f };
         const Quality qualities[] = { Quality::Major, Quality::Minor, Quality::Dominant7, Quality::Major7,
-                                      Quality::Minor7, Quality::Sus2, Quality::Sus4, Quality::Diminished };
-        const char* const suffixes[] = { "", "m", "7", "maj7", "m7", "sus2", "sus4", "dim" };
+                                      Quality::Minor7, Quality::Sus2, Quality::Sus4, Quality::Diminished,
+                                      Quality::Add9, Quality::MinorAdd9, Quality::Major9, Quality::Minor9, Quality::Dominant9 };
+        const char* const suffixes[] = { "", "m", "7", "maj7", "m7", "sus2", "sus4", "dim", "add9", "madd9", "maj9", "m9", "9" };
         const std::vector<int> intervals[] = { { 0, 4, 7 }, { 0, 3, 7 }, { 0, 4, 7, 10 }, { 0, 4, 7, 11 },
-                                               { 0, 3, 7, 10 }, { 0, 2, 7 }, { 0, 5, 7 }, { 0, 3, 6 } };
-        CHECK (numQualities == 8);
+                                               { 0, 3, 7, 10 }, { 0, 2, 7 }, { 0, 5, 7 }, { 0, 3, 6 },
+                                               { 0, 4, 7, 14 }, { 0, 3, 7, 14 }, { 0, 4, 7, 11, 14 }, { 0, 3, 7, 10, 14 }, { 0, 4, 7, 10, 14 } };
+        const bool sevenths[] = { false, false, true, true, true, false, false, false, false, false, true, true, true };
+        CHECK (numQualities == 13 && numBasicQualities == 8);
         for (int q = 0; q < numQualities; ++q)
         {
             CHECK ((int) qualities[q] == q);
@@ -466,7 +469,7 @@ int main()
             CHECK (chordName (Chord { 0, qualities[q] }) == std::string ("C") + suffixes[q]);
             CHECK (chordName (Chord { 8, qualities[q] }, eMajor) == std::string ("G#") + suffixes[q]);
             CHECK (chordName (Chord { 8, qualities[q] }, fMinor) == std::string ("Ab") + suffixes[q]);
-            CHECK (hasSeventh (qualities[q]) == (intervals[q].size() == 4));
+            CHECK (hasSeventh (qualities[q]) == sevenths[q]);
             CHECK (hasMinorThird (qualities[q]) == (intervals[q][1] == 3));
             for (int root = 0; root < 12; ++root)
             {

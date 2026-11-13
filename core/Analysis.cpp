@@ -1,4 +1,5 @@
 #include "Backline.h"
+#include "Fft.h"
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -8,37 +9,6 @@ namespace backline
 namespace
 {
 const double pi = 3.14159265358979323846;
-
-void fft (std::vector<std::complex<float>>& a)
-{
-    const size_t n = a.size();
-    for (size_t i = 1, j = 0; i < n; ++i)
-    {
-        size_t bit = n >> 1;
-        for (; j & bit; bit >>= 1)
-            j ^= bit;
-        j ^= bit;
-        if (i < j)
-            std::swap (a[i], a[j]);
-    }
-    for (size_t len = 2; len <= n; len <<= 1)
-    {
-        const double angle = -2.0 * pi / (double) len;
-        const std::complex<float> wLen ((float) std::cos (angle), (float) std::sin (angle));
-        for (size_t i = 0; i < n; i += len)
-        {
-            std::complex<float> w (1.0f, 0.0f);
-            for (size_t k = 0; k < len / 2; ++k)
-            {
-                const auto u = a[i + k];
-                const auto v = a[i + k + len / 2] * w;
-                a[i + k] = u + v;
-                a[i + k + len / 2] = u - v;
-                w *= wLen;
-            }
-        }
-    }
-}
 
 // Krumhansl-Kessler key profiles.
 const float majorProfile[12] = { 6.35f, 2.23f, 3.48f, 2.33f, 4.38f, 4.09f, 2.52f, 5.19f, 2.39f, 3.66f, 2.29f, 2.88f };

@@ -17,8 +17,12 @@ struct Key
     float confidence = 0.0f;
 };
 
-enum class Quality { Major, Minor, Dominant7, Major7, Minor7, Sus2, Sus4, Diminished };
-constexpr int numQualities = 8;
+// The first eight are the basic chords offered by chordVariations; the 9th chords after them are
+// colours that the variation engine adds (Cadd9, Cmadd9, Cmaj9, Cm9, C9).
+enum class Quality { Major, Minor, Dominant7, Major7, Minor7, Sus2, Sus4, Diminished,
+                     Add9, MinorAdd9, Major9, Minor9, Dominant9 };
+constexpr int numQualities = 13;
+constexpr int numBasicQualities = 8;
 
 struct Chord
 {
@@ -47,6 +51,8 @@ struct ChordEvent
     // The chord's 7th was added by withSevenths, so withoutSevenths takes it away again. Every
     // other edit of the chord clears it. Not part of ==.
     bool coloured = false;
+    // How sure the analysis is of this chord, 0..1 (1 for chords that were not detected). Not part of ==.
+    float confidence = 1.0f;
     // Equal when the chord is the same and the times agree to a billionth of a beat.
     bool operator== (const ChordEvent& o) const
     {
@@ -67,6 +73,9 @@ struct Note
     double start = 0.0;
     double length = 1.0;
     int velocity = 100;
+    // Glide into this note from the one before it: the note before ends where this one starts, and
+    // a MIDI output can overlap the two slightly (legato) so a mono synth with glide slides.
+    bool slide = false;
 };
 
 enum class ChordRhythm { Sustain, Quarters, Offbeat, Dotted };
@@ -83,17 +92,18 @@ struct ChromaFrames
 // the forms that take a key spell the note the way that key is written (G# in E major, Ab in Eb major).
 std::string pitchClassName (int pitchClass);
 std::string pitchClassName (int pitchClass, Key key);
-// C, Cm, C7, Cmaj7, Cm7, Csus2, Csus4, Cdim, and C/E when the bass is not the root.
+// C, Cm, C7, Cmaj7, Cm7, Csus2, Csus4, Cdim, Cadd9, Cmadd9, Cmaj9, Cm9, C9, and C/E when the bass
+// is not the root.
 std::string chordName (Chord chord);
 std::string chordName (Chord chord, Key key);
-std::string qualitySuffix (Quality quality);       // "", "m", "7", "maj7", "m7", "sus2", "sus4", "dim"
+std::string qualitySuffix (Quality quality);       // "", "m", "7", "maj7", "m7", "sus2", "sus4", "dim", "add9", "madd9", "maj9", "m9", "9"
 std::string keyName (Key key); // conventional spelling, e.g. "F# minor", "Bb major"
 
 // What a chord is made of.
-std::vector<int> chordIntervals (Quality quality); // semitones above the root, root first: { 0, 4, 7, 10 } for a dominant 7th
+std::vector<int> chordIntervals (Quality quality); // semitones above the root, root first: { 0, 4, 7, 10 } for a dominant 7th, { 0, 4, 7, 14 } for add9
 std::vector<int> chordPitchClasses (Chord chord);  // the chord tones, root first (the bass note is not added)
-bool hasSeventh (Quality quality);
-bool hasMinorThird (Quality quality);              // Minor, Minor7 and Diminished (written in lower case as a numeral)
+bool hasSeventh (Quality quality);                 // the 7th chords and the 9th chords that hold a 7th
+bool hasMinorThird (Quality quality);              // Minor, Minor7, Diminished, MinorAdd9, Minor9 (written in lower case as a numeral)
 bool isInScale (int pitchClass, Key key);          // major scale, or natural minor
 
 // Analysis
@@ -118,6 +128,10 @@ std::vector<Chord> rankChords (const Chroma& segment, Key key); // best fit firs
 // segments and the key's chords do not allow `count` different progressions.
 std::vector<std::vector<Chord>> suggestProgressions (const std::vector<Chroma>& segments,
                                                      Key key, int count);
+// "Regenerate": the same, but each segment is heard a little differently, so other plausible
+// ideas come up. Seed 0 gives exactly the ideas above; each other seed its own set.
+std::vector<std::vector<Chord>> suggestProgressions (const std::vector<Chroma>& segments,
+                                                     Key key, int count, std::uint32_t seed);
 
 
 // Progressions. Everything below is a pure function: it returns a new value and leaves its
@@ -152,7 +166,7 @@ Progression insertPassingChord (const Progression& progression, size_t index, Ke
 // The diminished chords lead up a semitone, so they are spelled with a sharp (sharpRoot).
 Chord passingChord (Chord from, Chord to, Key key);
 
-// Other forms of one chord for a "change chord type" menu: the same root in every quality whose
+// Other forms of one chord for a "change chord type" menu: the same root in every basic quality whose
 // notes belong to the key (in a minor key the raised 7th counts as well; for a root outside the
 // key, every quality), in root position, followed by the chord with its third and its fifth in
 // the bass. The chord itself is not in the list. They are spelled like the chord (sharpRoot).
@@ -164,7 +178,7 @@ std::vector<Chord> chordVariations (Chord chord, Key key);
 Chord seventhChord (Chord chord, Key key);
 // Colours every chord and marks the ones it changed (`coloured`).
 Progression withSevenths (const Progression& progression, Key key);
-// The reverse: Dominant7 and Major7 become Major, Minor7 becomes Minor.
+// The reverse: Dominant7, Major7 and the major 9th chords become Major, Minor7 and the minor 9th chords Minor.
 Chord triadChord (Chord chord);
 // Takes back only the 7ths withSevenths added: a 7th chord that was picked or inserted (a passing
 // dominant, a choice from a menu) stays as it is.
@@ -184,4 +198,110 @@ std::vector<Note> renderBass (const std::vector<Chord>& progression, double beat
 
 // Standard MIDI file (type 0)
 std::vector<uint8_t> writeMidiFile (const std::vector<Note>& notes, double bpm);
+
+// ---- Detailed chord timing (Timing.cpp) ----------------------------------------------------
+// "Auto" chord timing: chords follow the harmonic changes in the audio, down to one analysis
+// step (one beat, or half a beat below 90 BPM). The audio is assumed to start on a bar line.
+
+// Chroma measured once per analysis step, in time with the beat. `chroma` covers the whole
+// spectrum (C2 to about C7), `bass` only the bass register (below about 200 Hz), so an inversion
+// shows as a bass note that is not the chord's root. Each chroma sums to 1 (all zero where the
+// audio is silent); `energy` is the RMS level of each step.
+struct BeatChroma
+{
+    double stepBeats = 1.0;
+    double lengthBeats = 0.0;           // the loop the steps cover
+    std::vector<Chroma> chroma, bass;
+    std::vector<float> energy;
+    double tuningCents = 0.0;           // the recording's reference pitch against A = 440 Hz (-50..50)
+};
+// One beat, or half a beat below 90 BPM where a beat is long enough for two chords.
+double analysisStepBeats (double bpm);
+// Measures `loopBeats` beats of audio (or as many as there are when loopBeats <= 0). Steps after
+// the end of the audio are silent.
+BeatChroma analyseBeats (const float* mono, size_t numSamples, double sampleRate, double bpm, double loopBeats);
+
+// The chord heard in each part of the loop, as a progression of variable-length events lined up
+// with the analysis steps. `detail` runs from 0 (Simple: changes mostly on bar lines, short
+// passing chords smoothed over) to 1 (Detailed: every change, as short as one step). Repeats are
+// merged, slash chords come from the bass register, and every event carries a confidence.
+// The cost of a change falls as the detail rises, so more detail gives as many chords or more.
+// Silence takes the chord around it (the tonic if all is silent).
+constexpr double defaultDetail = 0.6;
+Progression detectChordTimeline (const BeatChroma& beats, Key key, double detail, double beatsPerBar = 4.0);
+// Ideas for Auto timing, all on the detected timing: the first follows the audio as closely as
+// it can (detectChordTimeline); the others put plausible diatonic alternatives in its place.
+// No two have the same chords. A different `seed` gives different alternatives (the first stays).
+std::vector<Progression> suggestTimedIdeas (const BeatChroma& beats, Key key, double detail, int count,
+                                            std::uint32_t seed = 0, double beatsPerBar = 4.0);
+
+// ---- Variations (Variation.cpp) ------------------------------------------------------------
+
+// A chord that can be played: root 0..11 and a bass that is the root or one of its chord tones.
+bool isValidChord (Chord chord);
+// A variation of a progression. Timing and loop length never change. `amount` 0..1: 0 returns the
+// progression unchanged; below 0.4 only the colour of chords changes (inversions, 7ths, 9ths,
+// sus) and every root stays; above it chords may also be substituted (relative, tritone,
+// secondary dominant, borrowed from the parallel key). The same seed gives the same result;
+// any amount above 0 changes at least one chord.
+Progression varyProgression (const Progression& progression, Key key, double amount, std::uint32_t seed);
+
+// ---- Patterns (Patterns.cpp) ---------------------------------------------------------------
+// Data-driven rhythm patterns for the chord and bass parts. A pattern is a string of steps, each
+// `stepBeats` long, repeating from the loop start (so it follows the bar lines):
+//   chords: 'X' accented hit, 'x' hit, '-' hold the note before, '.' rest
+//   bass:   a hit is a letter naming the note, upper case accented: 'r' bass note, 'o' octave
+//           above, 'f' fifth, 't' third, 's' seventh (octave if the chord has none), 'w' a walking
+//           step towards the next chord, 'a' a chromatic approach note into the next chord;
+//           '-' and '.' as for chords.
+// Rendering never lets a note cross a chord boundary or the loop end. A note held over a chord
+// change is struck again for the new chord; a chord with no hit of its own is struck on its
+// start; every bass hit on a chord start or a bar line plays the chord's bass note.
+enum class ChordStyle { Block, Rhythmic, Strum, Arpeggio };
+enum class ArpOrder { Up, Down, UpDown, Random };
+enum class Voicing { Close, Open, Spread };
+
+struct ChordPatternDef
+{
+    std::string id, name;
+    ChordStyle style = ChordStyle::Rhythmic;
+    std::string steps;                  // for Block: ignored (one hit per chord)
+    double stepBeats = 0.25;
+    double gate = 0.9;                  // fraction of a hit's length that sounds
+    ArpOrder order = ArpOrder::Up;      // Arpeggio only
+    double strumBeats = 0.0;            // Strum only: delay between the notes of a hit
+};
+struct BassPatternDef
+{
+    std::string id, name;
+    std::string steps;
+    double stepBeats = 0.25;
+    double gate = 0.9;
+    bool slides = false;                // notes that follow another without a gap glide into it
+    int octave = 0;                     // added to the normal bass register (C2..B2)
+};
+const std::vector<ChordPatternDef>& chordPatterns();
+const std::vector<BassPatternDef>& bassPatterns();
+int findChordPattern (const std::string& id);   // index, or -1
+int findBassPattern (const std::string& id);
+
+struct PatternOptions
+{
+    int pattern = 0;                    // index into chordPatterns() or bassPatterns()
+    double arpRate = 0.0;               // beats per arpeggio step, 0 = the pattern's own
+    Voicing voicing = Voicing::Close;   // chords only
+    int registerCentre = 60;            // chords only: the middle of the voicing (48..76)
+    double density = 1.0;               // 0..1: 1 plays the pattern as written, less leaves out weak hits
+    double swing = 0.0;                 // 0..1: delays every second step (up to a triplet feel)
+    double humanise = 0.0;              // 0..1: small, seeded changes of timing and velocity
+    double dynamics = 0.5;              // 0..1: difference between accented and other hits
+    int octaveShift = 0;                // -2..2
+    std::uint32_t seed = 1;
+    double beatsPerBar = 4.0;
+};
+std::vector<Note> renderChordPattern (const Progression& progression, const PatternOptions& options);
+std::vector<Note> renderBassPattern (const Progression& progression, const PatternOptions& options, Key key);
+// "Randomise pattern": a seeded pick of pattern, voicing and feel.
+PatternOptions randomChordOptions (std::uint32_t seed);
+PatternOptions randomBassOptions (std::uint32_t seed);
 }
