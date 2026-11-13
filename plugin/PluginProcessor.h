@@ -29,7 +29,12 @@ public:
     bool hasEditor() const override { return true; }
     const juce::String getName() const override { return "Backline"; }
     bool acceptsMidi() const override { return false; }
-    bool producesMidi() const override { return false; }
+    bool producesMidi() const override { return true; }
+
+    // MIDI out to the host: chords on channel 1, bass on channel 2.
+    static constexpr int chordMidiChannel = 1, bassMidiChannel = 2;
+    void setMidiOutEnabled (bool on) { midiOutEnabled.store (on); }
+    bool isMidiOutEnabled() const { return midiOutEnabled.load(); }
     double getTailLengthSeconds() const override { return 0.5; }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -309,6 +314,8 @@ private:
     double nextBeat = -1.0, takeNextBeat = -1.0; // where the last block ended, -1 after any interruption
     TakeReader takeMain, takeTail;               // the loop being played, and a fading-out continuation
     juce::MidiBuffer chordMidi, bassMidi, noMidi;
+    std::atomic<bool> midiOutEnabled { true };
+    bool midiOutWasOn = false; // audio thread only
     juce::AudioBuffer<float> synthBuffer, fadeBuffer;
 
     juce::ThreadPool worker { 1 }; // last, so it is stopped before anything its jobs touch is destroyed

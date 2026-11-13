@@ -45,7 +45,7 @@ if(BACKLINE_BUILD_PLUGIN)
         PRODUCT_NAME "Backline"
         IS_SYNTH FALSE
         NEEDS_MIDI_INPUT FALSE
-        NEEDS_MIDI_OUTPUT FALSE
+        NEEDS_MIDI_OUTPUT TRUE
         COPY_PLUGIN_AFTER_BUILD FALSE)
 
     juce_add_binary_data(BacklineAssets SOURCES

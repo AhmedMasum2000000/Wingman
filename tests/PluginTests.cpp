@@ -224,6 +224,7 @@ int main()
     juce::AudioBuffer<float> buffer (2, blockSize);
     juce::MidiBuffer midi;
     juce::int64 samplePos = 0;
+    int midiOns[3] = { 0, 0, 0 }, midiFlushes = 0, held = 0;
     auto runBlocks = [&] (double seconds, bool withInput)
     {
         const int chords[4][3] = { { 60, 64, 67 }, { 55, 59, 62 }, { 57, 60, 64 }, { 53, 57, 60 } };
@@ -243,6 +244,13 @@ int main()
                     buffer.setSample (1, i, v);
                 }
             processor.processBlock (buffer, midi);
+            for (const auto meta : midi) // MIDI out: count what leaves for the host, per channel
+            {
+                const auto m = meta.getMessage();
+                if (m.isNoteOn()) { ++midiOns[m.getChannel() == 2 ? 1 : 0]; if (m.getChannel() > 2) ++midiOns[2]; ++held; }
+                else if (m.isNoteOff()) --held;
+                else if (m.isAllNotesOff()) { ++midiFlushes; held = 0; }
+            }
             peak = juce::jmax (peak, buffer.getMagnitude (0, blockSize));
             if (playHead.playing)
             {
@@ -282,6 +290,21 @@ int main()
     std::printf ("preview peak while playing %.3f, after stop %.5f\n", playingPeak, stoppedPeak);
     CHECK (playingPeak > 0.05f && playingPeak < 1.0f);
     CHECK (stoppedPeak < 1.0e-4f);
+
+    // MIDI out: the same chords (channel 1) and bass (channel 2) reached the host, nothing on other
+    // channels, and stopping released every held note.
+    std::printf ("midi out: %d chord note-ons, %d bass note-ons, %d flushes, %d held after stop\n", midiOns[0], midiOns[1], midiFlushes, held);
+    CHECK (processor.producesMidi() && processor.isMidiOutEnabled());
+    CHECK (midiOns[0] >= 6 && midiOns[1] >= 2 && midiOns[2] == 0);
+    CHECK (midiFlushes >= 1 && held == 0);
+    processor.setMidiOutEnabled (false);
+    const int before = midiOns[0] + midiOns[1];
+    playHead.playing = true;
+    runBlocks (2.0, false);
+    playHead.playing = false;
+    runBlocks (0.2, false);
+    CHECK (midiOns[0] + midiOns[1] == before); // switched off: nothing leaves
+    processor.setMidiOutEnabled (true);
 
     processor.previewEnabled = false;
     playHead.playing = true;

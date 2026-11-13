@@ -151,6 +151,13 @@ void BacklineProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, 
 {
     haltPreviewAndTake();
     juce::AudioProcessor::processBlockBypassed (buffer, midi);
+    midi.clear();
+    if (midiOutWasOn)
+    {
+        for (int ch = chordMidiChannel; ch <= bassMidiChannel; ++ch)
+            midi.addEvent (juce::MidiMessage::allNotesOff (ch), 0);
+        midiOutWasOn = false;
+    }
 }
 
 // Sends the note events that fall in the block [blockStart, blockEnd) of a loop. Consecutive
@@ -180,8 +187,9 @@ void BacklineProcessor::scheduleNotes (const std::vector<Note>& notes, juce::Mid
             midi.addEvent (juce::MidiMessage::noteOn (1, n.pitch, (juce::uint8) n.velocity), offset);
 }
 
-void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& hostMidi)
 {
+    hostMidi.clear(); // we take no MIDI in; whatever leaves this block is ours
     juce::ScopedNoDenormals noDenormals;
     const int numSamples = buffer.getNumSamples(), numChannels = buffer.getNumChannels();
     for (int ch = getTotalNumInputChannels(); ch < numChannels; ++ch)
@@ -345,6 +353,7 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     // Preview the generated chords and bass in time with the transport.
     chordMidi.clear();
     bassMidi.clear();
+    bool flushHost = false;
     const bool hasLoop = playing && activePlayback != nullptr && activePlayback->lengthBeats > 0.0;
     const double loop = hasLoop ? activePlayback->lengthBeats : 1.0;
     const double startBeat = hasLoop ? positiveMod (ppq - activePlayback->originPpq, loop) : -1.0;
@@ -368,6 +377,7 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 
         if (restart)
         {
+            flushHost = true;
             chordSynth.allNotesOff (0, true);
             bassSynth.allNotesOff (0, true);
             auto chase = [blockStart, loop] (const std::vector<Note>& notes, juce::MidiBuffer& midi)
@@ -387,12 +397,36 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         if (wasPlaying)
         {
+            flushHost = true;
             chordSynth.allNotesOff (0, true);
             bassSynth.allNotesOff (0, true);
         }
         nextBeat = -1.0;
     }
     wasPlaying = shouldPlay;
+
+    // MIDI out: the same notes go to the host, chords on channel 1 and bass on channel 2, so the
+    // user can route them to any instrument. A restart or stop first releases whatever was held.
+    if (midiOutEnabled.load())
+    {
+        if (flushHost)
+            for (int ch = chordMidiChannel; ch <= bassMidiChannel; ++ch)
+                hostMidi.addEvent (juce::MidiMessage::allNotesOff (ch), 0);
+        hostMidi.addEvents (chordMidi, 0, numSamples, 0);
+        for (const auto meta : bassMidi)
+        {
+            auto message = meta.getMessage();
+            message.setChannel (bassMidiChannel);
+            hostMidi.addEvent (message, meta.samplePosition);
+        }
+        midiOutWasOn = true;
+    }
+    else if (midiOutWasOn)
+    {
+        for (int ch = chordMidiChannel; ch <= bassMidiChannel; ++ch)
+            hostMidi.addEvent (juce::MidiMessage::allNotesOff (ch), 0);
+        midiOutWasOn = false;
+    }
 
     if (synthBuffer.getNumSamples() < numSamples)
         synthBuffer.setSize (2, numSamples, false, false, true);
