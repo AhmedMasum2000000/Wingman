@@ -10,7 +10,7 @@
 // Plays the parts the M1D1 interface (the web page in the editor) sends: MIDI out on each part's channel,
 // and a simple preview sound for the parts whose Play is on. It follows the host's transport; when the
 // host is stopped and a part's Play is on, it runs its own clock from where the interface was.
-// It also keeps the last half minute of the track's audio the host played, for "Listen to track".
+// It also keeps the last minute of the track's audio the host played, for "Listen to track".
 namespace m1d1
 {
 struct Note { double start = 0, length = 0; int pitch = 60, velocity = 100; };
@@ -42,15 +42,20 @@ public:
     // where the music is, for the interface
     std::atomic<double> reportBeat { 0.0 }, reportBpm { 120.0 };
     std::atomic<bool> reportHostPlaying { false }, reportPreview { false };
+    std::atomic<int> reportNum { 4 }, reportDen { 4 };   // the host's time signature
 
-    // The track's recent audio as mono (about 22 kHz), starting on a bar line, with where that is in the song:
-    // startBeat is the song beat (host ppq) of the first sample, so the interface can read the chords on the
-    // host's own grid. Empty if less than 4 seconds were heard. level is the RMS, to tell silence apart.
-    struct Capture { std::vector<float> samples; double sampleRate = 0, startBeat = 0, bpm = 120, beatsPerBar = 4, level = 0; };
+    // The track's recent audio (about 22 kHz), starting on a bar line, with where it is in the song, so the
+    // interface can read the chords on the host's own grid:
+    //   samples  the mid (L+R)/2;  side  the side (L-R)/2, so parts spread wide in stereo are not lost
+    //   segments where each stretch starts: { second in the capture, song beat (host ppq) }. A host loop starts a
+    //            new segment, so every pass is placed at its real song beats.
+    //   level    the RMS of the mid, to tell silence apart.  Empty if less than 4 seconds were heard.
+    struct Segment { double sec = 0, beat = 0; };
+    struct Capture { std::vector<float> samples, side; std::vector<Segment> segments; double sampleRate = 0, startBeat = 0, bpm = 120, beatsPerBar = 4, level = 0; };
     Capture getCapture();
     // how much has been heard so far, without copying it: song beat of the first sample and the number of beats
     std::atomic<double> capturedFromBeat { 0.0 }, capturedBeats { 0.0 };
-    static constexpr double captureSeconds = 32.0;
+    static constexpr double captureSeconds = 64.0;   // a whole 8-bar stretch of the song even at 60 BPM
 
 private:
     struct Voice { int part = -1, pitch = 0; double phase = 0, inc = 0; float level = 0, gain = 0, z1 = 0, z2 = 0; bool releasing = false; };
@@ -61,6 +66,10 @@ private:
     void stopVoice (int part, int pitch);
     void render (juce::AudioBuffer<float>& buffer, int start, int end);
     void releaseHeld (juce::MidiBuffer& midi, int offset);
+    void releasePart (int part, juce::MidiBuffer& midi, int offset);
+    // After a start, a seek, a loop or new notes: what should be sounding at `from` (started before it and still
+    // going) is made to sound, notes that should not are released, and notes already right are left alone.
+    void reconcile (const Song& song, std::array<bool, 3> parts, double from, juce::MidiBuffer& midi);
 
     double sampleRate = 44100.0;
     std::atomic<const Song*> current { nullptr };
@@ -76,14 +85,22 @@ private:
     std::array<Voice, 32> voices;
     std::array<Event, 1024> events; int numEvents = 0;
     std::array<std::array<bool, 128>, 3> held {};   // notes on (sent as MIDI) per part
+    std::array<std::array<juce::int64, 128>, 3> heldAt {};   // when each was struck, in samples processed
+    juce::int64 samplesDone = 0; int lastBlock = 0;
     std::array<int, 3> heldChannel { 2, 1, 3 };
     const Song* lastSong = nullptr;
 
-    // capture: mono, decimated to about 22 kHz, written while the host plays
+    // capture: mid and side, decimated to about 22 kHz, written while the host plays
     juce::SpinLock captureLock;
-    std::vector<float> ring; size_t ringWrite = 0, ringCount = 0, ringTotal = 0;
+    std::vector<float> ring, ringSide; size_t ringWrite = 0, ringCount = 0, ringTotal = 0;
+    struct Mark { size_t total; double ppq; };      // a segment: from ring sample `total` on, the song is at `ppq`
+    std::vector<Mark> marks;                         // oldest first; at most maxMarks
+    static constexpr size_t maxMarks = 512;
     bool captureWasPlaying = false; double captureExpectedPpq = 0;
-    int decim = 2, decimCount = 0; float decimSum = 0;
-    double captureStartPpq = 0, captureBpm = 120, captureBeatsPerBar = 4;
+    int decim = 2, decimCount = 0, captureGap = 0;   // captureGap: input samples a busy block could not write
+    float decimSum = 0, decimSide = 0;
+    double captureBpm = 120, captureBeatsPerBar = 4;
+    void captureReset (double ppq, double bpm, double beatsPerBar);
+    void capturePush (float mid, float side);
 };
 } // namespace m1d1

@@ -526,15 +526,16 @@
   ];
   const TEMPLATE_W = [3, 2, 2, 0.8, 0.8, 1.2, 1, 1.5, 1, 1.5];
   const sameEl = (a, b) => a.d === b.d && (a.q || '') === (b.q || '') && (a.ext || 0) === (b.ext || 0) && (a.inv || 0) === (b.inv || 0);
+  // a progression is 4 or 8 bars: 16 or 32 beats in 4/4, 12 or 24 in 3/4 (up to 8 chords for 4 bars, 16 for 8)
   function validLens(spec) {
-    if (!Array.isArray(spec) || spec.length < 2 || spec.length > 8) return null;
-    const lens = spec.map(e => (e ? Number(e.len) : NaN));
-    if (!lens.every(l => Number.isInteger(l) && l > 0) || lens.reduce((a, b) => a + b, 0) !== 16) return null;
+    if (!Array.isArray(spec) || spec.length < 2 || spec.length > 16) return null;
+    const lens = spec.map(e => (e ? Number(e.len) : NaN)), total = lens.reduce((a, b) => a + b, 0);
+    if (!lens.every(l => Number.isInteger(l) && l > 0) || total < 8 || total > 48 || total % 2 !== 0 || (total <= 16 && spec.length > 8)) return null;
     return { lens, subs: spec.map((e, s) => !!e.sub && lens[s] <= 2) };
   }
   function cleanNotes(a) {
     if (!Array.isArray(a)) return null;
-    const ns = a.filter(n => n && Number.isFinite(n.x) && Number.isFinite(n.m) && n.x >= -0.12 && n.x < 16)
+    const ns = a.filter(n => n && Number.isFinite(n.x) && Number.isFinite(n.m) && n.x >= -0.12 && n.x < 32)
       .map(n => ({ x: n.x, len: Number.isFinite(n.len) && n.len > 0 ? n.len : 0.5, m: Math.round(n.m) })).sort((p, q) => p.x - q.x || p.m - q.m);
     return ns.length ? ns : null;
   }
@@ -546,9 +547,18 @@
     // the harmonic rhythm: the one the kept parts were written over, or a fresh one when nothing is kept
     let rh = kept ? validLens(o.frame) || validLens(o.current) : null;
     if (!rh) {
-      const tot = TEMPLATE_W.reduce((a, b) => a + b, 0); let x = r() * tot, t = 0;
-      while (t < TEMPLATES.length - 1 && (x -= TEMPLATE_W[t]) > 0) t++;
-      rh = { lens: TEMPLATES[t].map(c => c[0]), subs: TEMPLATES[t].map(c => !!c[1]) };
+      // a fresh harmonic rhythm, as long as the current progression (8 bars: two 4-bar templates)
+      const want = cur ? cur.reduce((a, e) => a + e.len, 0) : 16;
+      rh = { lens: [], subs: [] };
+      if (want % 16 !== 0) {   // not 4/4 (a 3/4 progression): one chord a bar, or two to a bar where the bar allows
+        const bars = want >= 24 ? 8 : 4, per = want / bars, half = per % 2 === 0 && r() < 0.35;
+        for (let b = 0; b < bars; b++) { if (half && b % 2 === 1) { rh.lens.push(per / 2, per / 2); rh.subs.push(false, false); } else { rh.lens.push(per); rh.subs.push(false); } }
+      }
+      while (rh.lens.reduce((a, b) => a + b, 0) < want) {
+        const tot = TEMPLATE_W.reduce((a, b) => a + b, 0); let x = r() * tot, t = 0;
+        while (t < TEMPLATES.length - 1 && (x -= TEMPLATE_W[t]) > 0) t++;
+        TEMPLATES[t].forEach(c => { rh.lens.push(c[0]); rh.subs.push(!!c[1]); });
+      }
     } else r();
     const n = rh.lens.length, segs = []; let at = 0;
     rh.lens.forEach(len => { segs.push({ at, end: at + len, len }); at += len; });

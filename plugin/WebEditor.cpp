@@ -53,6 +53,8 @@ void WebEditor::timerCallback()
     o->setProperty ("preview", e.reportPreview.load());
     o->setProperty ("beat", e.reportBeat.load());
     o->setProperty ("bpm", e.reportBpm.load());
+    o->setProperty ("num", e.reportNum.load());
+    o->setProperty ("den", e.reportDen.load());
     browser.emitEventIfBrowserIsVisible ("transport", juce::var (o));
 }
 
@@ -161,6 +163,16 @@ Options WebEditor::makeOptions()
             o->setProperty ("beatsPerBar", c.beatsPerBar);
             o->setProperty ("level", c.level);
             o->setProperty ("b64", juce::Base64::toBase64 (c.samples.data(), c.samples.size() * sizeof (float)));
+            o->setProperty ("side", juce::Base64::toBase64 (c.side.data(), c.side.size() * sizeof (float)));
+            juce::Array<juce::var> segs;
+            for (const auto& s : c.segments)
+            {
+                auto* so = new juce::DynamicObject();
+                so->setProperty ("sec", s.sec);
+                so->setProperty ("beat", s.beat);
+                segs.add (juce::var (so));
+            }
+            o->setProperty ("segments", segs);
             done (juce::var (o));
         });
 

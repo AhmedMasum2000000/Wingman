@@ -12,19 +12,25 @@ When the page finds JUCE's bridge (`window.__JUCE__`) it runs in plugin mode:
 | `setPreview`     | Runs its own clock from the page's position while the host is stopped       |
 | `saveState`, `getState` | Keeps the page's session in the host project                         |
 | `saveMidi`, `dragMidi`  | File dialog / a real Windows drag of the `.mid` file                 |
-| `getTrackAudio`  | The last half minute of the track's audio, starting on a bar line, with the song beat it starts on (`startBeat`), the host tempo and its level |
+| `getTrackAudio`  | The last minute of the track's audio, starting on a bar line, with the song beat it starts on (`startBeat`), the host tempo and its level |
 | `getCaptureInfo` | How many beats of the track have been heard so far (for listening on its own) |
 
 Inside the DAW the page starts empty (no example chords, no MIDI) and listens to the track on its own the
-first time the host has played one whole 4-bar stretch of the song's grid. Track audio is analysed on the
+first time the host has played one whole 4-bar stretch of the song's grid. It reads again each time 4 more
+bars have played, while nothing was changed by hand, until two reads agree (an intro gives way to the song,
+an 8-bar progression is read whole). Drums or noise only are not read as chords. Track audio is analysed on the
 host's grid (`M1D1Listen.analyse(..., { grid: { bpm, firstBeatSec, startBeat, beatsPerBar } })`): the host's
-tempo, and the 16 beats that line up with the song's 4-bar grid, so the parts the plugin plays at
-`ppq mod 16` are the chords at that place in the song. Repeated passes are averaged; a progression longer
-than 4 bars is read from its latest pass. `node test-grid.js` measures this.
+tempo and time signature, and the 4 bars (or 8, when the music changes from one 4-bar stretch to the next)
+that line up with the song's grid, so the parts the plugin plays at `ppq mod length` are the chords at that
+place in the song. Host loops are passed as `segments` (each pass at its real song beats), the side channel
+(L-R) as `side` for parts spread out of phase. Passes that agree are averaged. If the audio does not follow
+the project's tempo, the result says so (`audioBpm`). `node test-grid.js` and `node test-grid2.js` measure this.
 
 The plugin sends a `transport` event about 30 times a second: `{ host, preview, beat, bpm }`.
 
 `src/` holds the page's sources: the template, the part generator (`m1d1-gen.js`) and the audio
-analyser (`m1d1-listen.js`) with their tests (`node test-gen.js`, `node test-listen.js`).
+analyser (`m1d1-listen.js`) with their tests (`node test-gen.js`, `node test-listen.js`, `node test-grid.js`,
+`node test-grid2.js`). `make-plugin-page.py` turns the preview build into `m1d1.html` (standards mode, UTF-8,
+fonts embedded so the plugin works offline).
 The template's placeholders (`@@FRAMES@@`, `/*@@GEN@@*/`, ...) are filled with the generator,
 the analyser, the character kit and the mascot frames to produce `m1d1.html`.

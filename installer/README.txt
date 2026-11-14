@@ -22,7 +22,9 @@ USE IT IN FL STUDIO
   - Put M1D1 on the mixer insert of the audio you want to build around.
   - Extract: press Play in FL Studio. M1D1 listens to the track and, after 4 bars, shows its key and
     chords on FL Studio's own tempo and bars, and writes bass, chords and lead that line up with the song.
-    Press LISTEN TO TRACK to read it again (for example from another part of the song).
+    While FL Studio plays it keeps listening until it is sure (an intro gives way to the song, an 8-bar
+    progression is read whole). Press LISTEN TO TRACK to read it again (for example from another part).
+    Put M1D1 on your audio's own mixer insert, not on the Master or on the instrument playing its MIDI.
     Or press OPEN AUDIO (or drop a WAV/MP3 on M1D1) to read a file instead.
     Until it has heard something, M1D1 sends no MIDI.
   - Generate: pick a key, scale and tempo and M1D1 writes the parts for you.

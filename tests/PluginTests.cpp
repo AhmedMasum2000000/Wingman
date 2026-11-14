@@ -1526,7 +1526,7 @@ static void webEngineTests()
     for (auto& c : ons) c = 0;
     engine.setPreview (true, 0.5, 120.0);
     run (2.1, false);
-    CHECK (engine.reportPreview.load() && ons[1] == 3 && ons[3] == 1 && ons[2] == 1);   // one loop from beat 0.5
+    CHECK (engine.reportPreview.load() && ons[1] == 3 && ons[3] == 1 && ons[2] == 2);   // one loop from beat 0.5: the bass sounding at 0.5 is started at once, then again at beat 4
     engine.setPreview (false, 0, 120.0);
     run (0.05, false);
     CHECK (! engine.reportPreview.load());
@@ -1562,6 +1562,95 @@ static void webEngineTests()
         CHECK (ons[2] == 0 && ons[1] == 3 && ons[3] == 1);
         stuck = 0; for (auto& [k, v] : heldNotes) stuck += v > 0 ? 1 : 0;
         CHECK (stuck == 0);
+    }
+
+    // notes that should already be sounding are started: a start in the middle of a chord, and a loop wrap that
+    // lands a hair after the loop's first beat (FL Studio does not always split the block at the loop point)
+    {
+        m1d1::Engine e2; e2.prepare (sr, block);
+        e2.setSong (m1d1::parseSong (R"({"loopBeats":4,"parts":[{"ch":2,"notes":[[0,4,36,100]]},{"ch":1,"notes":[[0,4,60,90]]},{"ch":3,"notes":[]}]})"));
+        FakePlayHead h; h.playing = true; h.bpm = 120;
+        auto runE = [&] (double startPpq, int blocks, int& onsOut)
+        {
+            h.ppq = startPpq;
+            for (int k = 0; k < blocks; ++k)
+            {
+                juce::AudioBuffer<float> b2 (2, block); b2.clear(); juce::MidiBuffer m2;
+                e2.process (b2, m2, &h, 2);
+                for (const auto m : m2) if (m.getMessage().isNoteOn()) ++onsOut;
+                h.ppq += block * h.bpm / 60.0 / sr;
+            }
+        };
+        int onMid = 0; runE (1.37, 3, onMid);                 // start in the middle of the bar
+        CHECK (onMid == 2);                                     // the chord and the bass sound at once
+        int onWrap = 0; runE (1.0e-6, 3, onWrap);              // the host loops back, landing just after beat 0
+        CHECK (onWrap == 2);
+        int onLate = 0; runE (0.003, 3, onLate);               // or a few samples late
+        CHECK (onLate == 2);
+        // the interface re-sends the same notes with only a part's Play changed: nothing is cut
+        e2.setSong (m1d1::parseSong (R"({"loopBeats":4,"parts":[{"ch":2,"sound":true,"notes":[[0,4,36,100]]},{"ch":1,"notes":[[0,4,60,90]]},{"ch":3,"notes":[]}]})"));
+        h.ppq = 0.003 + 3 * block * h.bpm / 60.0 / sr;
+        int offs2 = 0, ons2 = 0;
+        for (int k = 0; k < 10; ++k)
+        {
+            juce::AudioBuffer<float> b2 (2, block); b2.clear(); juce::MidiBuffer m2;
+            e2.process (b2, m2, &h, 2);
+            for (const auto m : m2) { if (m.getMessage().isNoteOff()) ++offs2; if (m.getMessage().isNoteOn()) ++ons2; }
+            h.ppq += block * h.bpm / 60.0 / sr;
+        }
+        CHECK (offs2 == 0 && ons2 == 0);
+        // a changed part is restarted where it is; the unchanged one keeps sounding
+        e2.setSong (m1d1::parseSong (R"({"loopBeats":4,"parts":[{"ch":2,"sound":true,"notes":[[0,4,36,100]]},{"ch":1,"notes":[[0,4,64,90]]},{"ch":3,"notes":[]}]})"));
+        juce::AudioBuffer<float> b3 (2, block); b3.clear(); juce::MidiBuffer m3;
+        e2.process (b3, m3, &h, 2);
+        int off60 = 0, on64 = 0, off36 = 0;
+        for (const auto m : m3) { const auto g = m.getMessage(); if (g.isNoteOff() && g.getNoteNumber() == 60) ++off60; if (g.isNoteOn() && g.getNoteNumber() == 64) ++on64; if (g.isNoteOff() && g.getNoteNumber() == 36) ++off36; }
+        CHECK (off60 == 1 && on64 == 1 && off36 == 0);
+    }
+
+    // big blocks: the host wraps a 1-bar loop inside a block; the chord on beat 1 is struck once per pass, not twice
+    {
+        const int big = 2048;
+        m1d1::Engine e3; e3.prepare (sr, big);
+        e3.setSong (m1d1::parseSong (R"({"loopBeats":4,"parts":[{"ch":2,"notes":[]},{"ch":1,"notes":[[0,4,60,90]]},{"ch":3,"notes":[]}]})"));
+        FakePlayHead h; h.playing = true; h.bpm = 120;
+        const double bb = big * h.bpm / 60.0 / sr;
+        int strikes = 0, passes = 0;
+        double pos = 0;
+        for (int k = 0; k < 400; ++k)
+        {
+            h.ppq = pos;
+            juce::AudioBuffer<float> b2 (2, big); b2.clear(); juce::MidiBuffer m2;
+            e3.process (b2, m2, &h, 2);
+            for (const auto m : m2) if (m.getMessage().isNoteOn()) ++strikes;
+            pos += bb;
+            if (pos >= 4.0) { pos -= 4.0; ++passes; }   // the host loops bar 1, wrapping inside the block
+        }
+        CHECK (strikes == passes + 1);   // once at the start, then once per pass
+    }
+
+    // a 3-bar loop in the host: each pass is placed at its real song beats (segments), so the chords read from it
+    // line up with what the plugin plays at ppq mod the progression's length
+    {
+        m1d1::Engine e4; e4.prepare (sr, block);
+        FakePlayHead h; h.playing = true; h.bpm = 120;
+        juce::AudioBuffer<float> b2 (2, block);
+        for (int k = 0; k < (int) (20.0 * sr / block); ++k)
+        {
+            for (int i = 0; i < block; ++i) { b2.setSample (0, i, 0.1f); b2.setSample (1, i, -0.1f); }   // all side, no mid
+            juce::MidiBuffer m2; e4.process (b2, m2, &h, 2);
+            h.ppq += block * h.bpm / 60.0 / sr;
+            if (h.ppq >= 12.0 - 1.0e-9) h.ppq -= 12.0;   // bars 1-3, looped
+        }
+        const auto cap = e4.getCapture();
+        CHECK (cap.segments.size() >= 3 && cap.segments[0].beat == 0.0 && cap.segments[1].beat < 0.05 && std::abs (cap.segments[1].sec - 6.0) < 0.05);
+        float side = 0, mid = 0; for (size_t i = 0; i < cap.side.size(); ++i) { side = std::max (side, std::abs (cap.side[i])); mid = std::max (mid, std::abs (cap.samples[i])); }
+        CHECK (side > 0.09f && mid < 1.0e-6f);   // a part spread wide in stereo survives in the side channel
+        // the host re-prepares while it keeps playing: the next block starts a new recording at its own place
+        e4.prepare (sr, block);
+        h.ppq = 5.0;
+        for (int k = 0; k < (int) (6.0 * sr / block); ++k) { juce::MidiBuffer m2; e4.process (b2, m2, &h, 2); h.ppq += block * h.bpm / 60.0 / sr; }
+        CHECK (e4.getCapture().startBeat == 8.0);
     }
 
     // the processor saves the interface's session and parts with the project, and plays them after loading

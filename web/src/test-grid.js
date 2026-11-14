@@ -36,9 +36,9 @@ function song(c) {
   for (let b = Math.floor(c.startBeat) - 4; b < c.startBeat + c.beats + 4; b++) {
     const ch = chordAt(b); if (ch.first !== b) continue;
     const ct = Gen.chordTones(ch.el, key), t0 = (b - c.startBeat) * beat;
-    for (const m0 of ct.notes) { let m = m0; while (m > 71) m -= 12; const hz = 440 * Math.pow(2, (m - 69) / 12); for (const cents of [-4, 4]) addTone(out, sr, t0, ch.len * beat, hz * Math.pow(2, cents / 1200), 0.05, 8, c.stabs ? pluckEnv : padEnv); }
+    if (c.only !== 'bass') for (const m0 of ct.notes) { let m = m0; while (m > 71) m -= 12; const hz = 440 * Math.pow(2, (m - 69) / 12); for (const cents of [-4, 4]) addTone(out, sr, t0, ch.len * beat, hz * Math.pow(2, cents / 1200), 0.05, 8, c.stabs ? pluckEnv : padEnv); }
     const bhz = 440 * Math.pow(2, (36 + ct.pcs[0] - 69) / 12);
-    for (let k = 0; k < ch.len; k++) addTone(out, sr, t0 + k * beat, beat * 0.9, bhz, 0.2, 6, pluckEnv);
+    if (c.only !== 'chords') for (let k = 0; k < ch.len; k++) addTone(out, sr, t0 + k * beat, beat * 0.9, bhz, 0.2, 6, pluckEnv);
   }
   if (c.drums) for (let b = Math.ceil(c.startBeat); b < c.startBeat + c.beats; b++) {
     const t0 = (b - c.startBeat) * beat, i0 = Math.round(t0 * sr);
@@ -52,12 +52,13 @@ function song(c) {
 function expandRoots(spec, key) { const out = []; for (const el of spec) { const r = Gen.chordTones(el, key).tones.root; for (let b = 0; b < el.len; b++) out.push(r); } return out; }
 
 // how the plugin plays a result: progression beat (songBeat mod 16)
+// every beat of one whole cycle of the song (4 or 8 bars), as the plugin plays it: progression beat = song beat mod its length
 function asPlayed(res, s, c, windowStart) {
   const roots = expandRoots(res.spec, { root: res.key.root, st: SCALES[res.key.scaleIdx], minor: SCALES[res.key.scaleIdx][2] === 3 });
-  let ok = 0; for (let b = windowStart; b < windowStart + 16; b++) if (roots[mod(b, 16)] === s.rootAt(b)) ok++;
+  let ok = 0; for (let b = windowStart; b < windowStart + s.L; b++) if (roots[mod(b, roots.length)] === s.rootAt(b)) ok++;
   return ok;
 }
-const P = (...e) => e.map(([d, len]) => ({ d, len }));
+const P = (...e) => e.map(([d, len, x]) => ({ d, len, ...(x || {}) }));
 module.exports = { song, expandRoots, P, SCALES };
 if (require.main === module) {
 const cases = [];
@@ -71,25 +72,26 @@ let seed = 1;
 for (const [name, prog] of Object.entries(progs))
   for (const bpm of [72, 96, 128, 150, 174])
     for (const startBeat of [0, 6, 21])
-      cases.push({ name: `${name} ${bpm} BPM from beat ${startBeat}`, prog, bpm, startBeat, beats: Math.min(64, Math.round(30 * bpm / 60)), root: (seed * 5) % 12, scaleIdx: seed % 2, drums: seed % 3 !== 0, stabs: seed % 4 === 0, seed: seed++ });
+      cases.push({ name: `${name} ${bpm} BPM from beat ${startBeat}`, prog, bpm, startBeat, beats: Math.round(60 * bpm / 60),   // the plugin keeps 64 s; 60 s are read
+ root: (seed * 5) % 12, scaleIdx: seed % 2, drums: seed % 3 !== 0, stabs: seed % 4 === 0, seed: seed++ });
 
 let free = 0, grid = 0, total = 0, keyFree = 0, keyGrid = 0, tempoFree = 0, fails = [];
 for (const c of cases) {
   const s = song(c), bpb = 4;
   // the window the plugin plays against: the latest full 4-bar line of the song inside the capture
-  const end = c.startBeat + c.beats, w16 = Math.floor(end / 16) * 16 - 16, win = w16 >= c.startBeat ? w16 : Math.ceil(c.startBeat / 16) * 16;
+  const end = c.startBeat + c.beats, Lt = s.L, wl = Math.floor(end / Lt) * Lt - Lt, win = wl >= c.startBeat ? wl : Math.ceil(c.startBeat / Lt) * Lt;
   const rf = Listen.analyse(s.samples, s.sr, { gen: Gen });
   const rg = Listen.analyse(s.samples, s.sr, { gen: Gen, grid: { bpm: c.bpm, firstBeatSec: 0, startBeat: c.startBeat, beatsPerBar: bpb } });
   // free mode: as the old plugin played it (its spec at ppq mod 16, its own downbeat ignored, as the page did)
   const okF = asPlayed(rf, s, c, win), okG = asPlayed(rg, s, c, win);
-  free += okF; grid += okG; total += 16;
+  free += okF; grid += okG; total += s.L;
   if (rf.key.root === s.key.root) keyFree++; if (rg.key.root === s.key.root) keyGrid++;
   if (Math.abs(rf.bpm - c.bpm) <= 1) tempoFree++;
-  if (okG < 16) fails.push(`${c.name}: ${okG}/16 (${rg.notes.join('; ')})`);
-  if (verbose) console.log(`${c.name.padEnd(36)} free ${String(okF).padStart(2)}/16 bpm ${rf.bpm}   grid ${String(okG).padStart(2)}/16`);
+  if (okG < s.L) fails.push(`${c.name}: ${okG}/${s.L} (${rg.notes.join('; ')})`);
+  if (verbose) console.log(`${c.name.padEnd(36)} free ${String(okF).padStart(2)}/${s.L} bpm ${rf.bpm}   grid ${String(okG).padStart(2)}/${s.L}  (${rg.spec.reduce((a, e) => a + e.len, 0)} beats read)`);
 }
 const pct = (a, b) => (100 * a / b).toFixed(1) + ' %';
-console.log(`${cases.length} songs. Chord root right where the plugin plays it (per beat):`);
+console.log(`${cases.length} songs. Chord root right where the plugin plays it, every beat of a whole cycle of the song:`);
 console.log(`  before (analyser guesses tempo and downbeat): ${pct(free, total)}   tempo right ${pct(tempoFree, cases.length)}   key root ${pct(keyFree, cases.length)}`);
 console.log(`  host grid (host tempo, song beat):             ${pct(grid, total)}   key root ${pct(keyGrid, cases.length)}`);
 if (fails.length) { console.log('below 16/16 with the host grid:'); fails.forEach(f => console.log('  ' + f)); }

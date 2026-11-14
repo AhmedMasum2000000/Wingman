@@ -51,7 +51,25 @@ std::shared_ptr<Song> parseSong (const juce::String& json)
     return song;
 }
 
-Engine::Engine() { ring.assign ((size_t) (captureSeconds * 24000.0), 0.0f); }
+Engine::Engine() { ring.assign ((size_t) (captureSeconds * 24000.0), 0.0f); ringSide.assign (ring.size(), 0.0f); marks.reserve (maxMarks); }
+
+void Engine::captureReset (double ppq, double bpm, double bpb)
+{
+    ringWrite = ringCount = ringTotal = 0; decimCount = 0; decimSum = decimSide = 0; captureGap = 0;
+    marks.clear(); marks.push_back ({ 0, ppq });
+    captureBpm = bpm; captureBeatsPerBar = bpb;
+}
+
+void Engine::capturePush (float mid, float side)
+{
+    decimSum += mid; decimSide += side;
+    if (++decimCount < decim) return;
+    ring[ringWrite] = decimSum / (float) decim; ringSide[ringWrite] = decimSide / (float) decim;
+    ringWrite = (ringWrite + 1) % ring.size();
+    ringCount = juce::jmin (ringCount + 1, ring.size());
+    ++ringTotal;
+    decimCount = 0; decimSum = decimSide = 0;
+}
 
 void Engine::prepare (double newRate, int)
 {
@@ -59,8 +77,12 @@ void Engine::prepare (double newRate, int)
     const juce::SpinLock::ScopedLockType lock (captureLock);
     decim = juce::jmax (1, (int) std::round (sampleRate / 22050.0));
     ring.assign ((size_t) (captureSeconds * sampleRate / decim) + 1, 0.0f);
+    ringSide.assign (ring.size(), 0.0f);
     ringWrite = ringCount = ringTotal = 0;
-    decimCount = 0; decimSum = 0;
+    decimCount = 0; decimSum = decimSide = 0; captureGap = 0;
+    marks.clear(); marks.reserve (maxMarks);
+    captureWasPlaying = false; captureExpectedPpq = 0;   // the next playing block starts a new recording at its own place
+    capturedFromBeat = 0; capturedBeats = 0;
     for (auto& v : voices) v.part = -1;
 }
 
@@ -168,6 +190,56 @@ void Engine::releaseHeld (juce::MidiBuffer& midi, int offset)
         if (v.part >= 0) v.releasing = true;
 }
 
+void Engine::releasePart (int p, juce::MidiBuffer& midi, int offset)
+{
+    for (int n = 0; n < 128; ++n)
+        if (held[(size_t) p][(size_t) n])
+        {
+            midi.addEvent (juce::MidiMessage::noteOff (heldChannel[(size_t) p], n), offset);
+            held[(size_t) p][(size_t) n] = false;
+        }
+    for (auto& v : voices)
+        if (v.part == p) v.releasing = true;
+}
+
+void Engine::reconcile (const Song& song, std::array<bool, 3> parts, double from, juce::MidiBuffer& midi)
+{
+    const double L = song.loopBeats, rel = positiveMod (from, L);
+    for (int i = 0; i < 3; ++i)
+    {
+        if (! parts[(size_t) i])
+            continue;
+        const auto& part = song.parts[(size_t) i];
+        std::array<int, 128> want {};   // velocity of each pitch that should be sounding now, 0 if none
+        if (part.midi || part.sound)
+            for (const auto& n : part.notes)
+            {
+                const double end = juce::jmax (n.start + 0.01, juce::jmin (n.start + n.length, L) - 0.002);
+                if (n.start < rel && end > rel + 0.05) want[(size_t) n.pitch] = n.velocity;
+            }
+        for (int p = 0; p < 128; ++p)
+        {
+            auto& isHeld = held[(size_t) i][(size_t) p];
+            // a note struck in the last two blocks is the one wanted now (a host loop that wraps inside a block);
+            // one struck earlier is struck again, as the music does when it comes round
+            if (isHeld && want[(size_t) p] > 0 && samplesDone - heldAt[(size_t) i][(size_t) p] > 2 * lastBlock)
+            {
+                midi.addEvent (juce::MidiMessage::noteOff (heldChannel[(size_t) i], p), 0);
+                isHeld = false;
+                stopVoice (i, p);
+            }
+            if (isHeld && want[(size_t) p] == 0)
+            {
+                midi.addEvent (juce::MidiMessage::noteOff (heldChannel[(size_t) i], p), 0);
+                isHeld = false;
+                stopVoice (i, p);
+            }
+            else if (! isHeld && want[(size_t) p] > 0 && numEvents < (int) events.size())
+                events[(size_t) numEvents++] = { 0, i, p, want[(size_t) p], true };   // sent with the block's events
+        }
+    }
+}
+
 void Engine::stopAll (juce::MidiBuffer& midi)
 {
     releaseHeld (midi, 0);
@@ -190,55 +262,60 @@ void Engine::process (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, 
             hostPlaying = pos->getIsPlaying();
             if (auto b = pos->getBpm()) bpm = juce::jlimit (20.0, 999.0, *b);
             if (auto p = pos->getPpqPosition()) { ppq = *p; hasPpq = true; }
-            if (auto sig = pos->getTimeSignature()) beatsPerBar = juce::jmax (1.0, sig->numerator * 4.0 / juce::jmax (1, sig->denominator));
+            if (auto sig = pos->getTimeSignature())
+            {
+                beatsPerBar = juce::jmax (1.0, sig->numerator * 4.0 / juce::jmax (1, sig->denominator));
+                reportNum = juce::jlimit (1, 32, sig->numerator); reportDen = juce::jlimit (1, 32, sig->denominator);
+            }
         }
     hostPlaying = hostPlaying && hasPpq;
 
-    // the track's audio, while the host plays (a seek starts a new recording)
+    // The track's audio, while the host plays. A loop in the host (back to a bar line) carries on with a new
+    // segment at its real song position; any other jump (a seek) or a tempo change starts a new recording.
     {
         const double blockBeats = numSamples * bpm / (60.0 * sampleRate);
+        bool jumped = hostPlaying && captureWasPlaying && std::abs (ppq - captureExpectedPpq) > std::max (0.01, 0.5 * blockBeats);
+        bool looped = false;
+        if (jumped)
+        {
+            // a host that wraps the loop inside a block reports the next block up to a block past the bar line
+            const double tol = std::max (0.05, blockBeats + 0.01);
+            const auto onBar = [&] (double b) { const double r = positiveMod (b, beatsPerBar); return r < tol || r > beatsPerBar - tol; };
+            looped = ppq < captureExpectedPpq && onBar (ppq) && onBar (captureExpectedPpq);
+        }
+        const bool restart = hostPlaying && (! captureWasPlaying || (jumped && ! looped) || std::abs (bpm - captureBpm) > 0.01);
         const juce::SpinLock::ScopedTryLockType lock (captureLock);
         if (lock.isLocked() && ! ring.empty())
         {
-            bool jumped = hostPlaying && captureWasPlaying && std::abs (ppq - captureExpectedPpq) > std::max (0.01, 0.5 * blockBeats);
-            if (jumped)
+            if (restart)
+                captureReset (ppq, bpm, beatsPerBar);
+            else if (hostPlaying && captureGap > 0)
+                for (; captureGap > 0; --captureGap) capturePush (0.0f, 0.0f);   // a block skipped while the interface read: keep the timeline
+            if (hostPlaying && looped)
             {
-                // A loop in the host (FL Studio's pattern loop, a looped playlist range) jumps back to a bar line from a
-                // bar line: the music carries on, so the recording does too, as if the song went on.
-                const auto onBar = [&] (double b) { const double r = positiveMod (b, beatsPerBar); return r < 0.05 || r > beatsPerBar - 0.05; };
-                const double span = captureExpectedPpq - ppq;
-                if (span > 0.5 && onBar (ppq) && onBar (captureExpectedPpq) && onBar (span))
-                    jumped = false;
-            }
-            if (hostPlaying && (! captureWasPlaying || jumped || std::abs (bpm - captureBpm) > 0.01))
-            {
-                ringWrite = ringCount = ringTotal = 0; decimCount = 0; decimSum = 0;
-                captureStartPpq = ppq; captureBpm = bpm; captureBeatsPerBar = beatsPerBar;
+                if (marks.size() >= maxMarks) marks.erase (marks.begin());
+                marks.push_back ({ ringTotal, ppq });
             }
             if (hostPlaying)
             {
                 const int inputs = juce::jmin (numInputChannels, buffer.getNumChannels());
                 for (int i = 0; i < numSamples; ++i)
                 {
-                    float mix = 0;
-                    for (int ch = 0; ch < inputs; ++ch) mix += buffer.getSample (ch, i);
-                    decimSum += mix / (float) juce::jmax (1, inputs);
-                    if (++decimCount == decim)
-                    {
-                        ring[ringWrite] = decimSum / (float) decim;
-                        ringWrite = (ringWrite + 1) % ring.size();
-                        ringCount = juce::jmin (ringCount + 1, ring.size());
-                        ++ringTotal;
-                        decimCount = 0; decimSum = 0;
-                    }
+                    const float l = inputs > 0 ? buffer.getSample (0, i) : 0.0f, r = inputs > 1 ? buffer.getSample (1, i) : l;
+                    capturePush (0.5f * (l + r), 0.5f * (l - r));
                 }
-                captureExpectedPpq = ppq + blockBeats;
                 const double rate = sampleRate / decim;
-                capturedFromBeat = captureStartPpq + (double) (ringTotal - ringCount) / rate * captureBpm / 60.0;
+                // the song beat of the oldest kept sample, from the segment it is in
+                const size_t oldest = ringTotal - ringCount;
+                size_t m = 0; while (m + 1 < marks.size() && marks[m + 1].total <= oldest) ++m;
+                capturedFromBeat = marks.empty() ? ppq : marks[m].ppq + (double) (oldest - marks[m].total) / rate * captureBpm / 60.0;
                 capturedBeats = (double) ringCount / rate * captureBpm / 60.0;
             }
-            captureWasPlaying = hostPlaying;
         }
+        else if (hostPlaying && ! restart)
+            captureGap += numSamples;
+        if (hostPlaying) captureExpectedPpq = ppq + blockBeats;
+        captureWasPlaying = hostPlaying;
     }
 
     // the interface's Play while the host is stopped
@@ -256,9 +333,36 @@ void Engine::process (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, 
     const double blockBeats = numSamples * tempo / (60.0 * sampleRate);
 
     numEvents = 0;
+    // New notes from the interface: a part whose notes, channel and MIDI switch are unchanged keeps sounding (the
+    // interface re-sends when only a part's Play changes); a changed part is released and its notes that should be
+    // sounding now are started.
+    std::array<bool, 3> restart { false, false, false };
     if (song != lastSong)
     {
-        releaseHeld (midi, 0);   // new notes: start clean
+        for (int p = 0; p < 3; ++p)
+        {
+            const auto* was = lastSong != nullptr ? &lastSong->parts[(size_t) p] : nullptr;
+            const auto* now = song != nullptr ? &song->parts[(size_t) p] : nullptr;
+            const auto sameNotes = [] (const Part& a, const Part& b)
+            {
+                if (a.channel != b.channel || a.midi != b.midi || a.notes.size() != b.notes.size()) return false;
+                for (size_t k = 0; k < a.notes.size(); ++k)
+                    if (a.notes[k].pitch != b.notes[k].pitch || a.notes[k].velocity != b.notes[k].velocity
+                        || std::abs (a.notes[k].start - b.notes[k].start) > 1.0e-6 || std::abs (a.notes[k].length - b.notes[k].length) > 1.0e-6)
+                        return false;
+                return true;
+            };
+            if (was == nullptr || now == nullptr || was->channel != now->channel || was->midi != now->midi)
+            {
+                releasePart (p, midi, 0);   // another channel, or MIDI switched: everything of this part starts over
+                restart[(size_t) p] = true;
+            }
+            else if (! sameNotes (*was, *now))
+                restart[(size_t) p] = true;   // new notes: keep what still fits, release the rest, start what is missing
+            else if (now->sound && ! was->sound)   // Play switched on: the held notes sound from here
+                for (int n = 0; n < 128; ++n)
+                    if (held[(size_t) p][(size_t) n]) startVoice (p, n, 100);
+        }
         lastSong = song;
     }
     if (song != nullptr)
@@ -272,7 +376,8 @@ void Engine::process (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, 
     if (playing && song != nullptr)
     {
         if (! wasPlaying || std::abs (b0 - expectedBeat) > std::max (0.01, 0.5 * blockBeats))
-            releaseHeld (midi, 0);   // a start, a seek or a loop jump in the host
+            restart = { true, true, true };   // a start, a seek or a loop in the host
+        reconcile (*song, restart, b0, midi);
         collectEvents (*song, b0, b0 + blockBeats, numSamples);
         expectedBeat = b0 + blockBeats;
         if (! hostPlaying) previewBeat += blockBeats;
@@ -297,6 +402,7 @@ void Engine::process (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, 
             if (isHeld) midi.addEvent (juce::MidiMessage::noteOff (ch, ev.pitch), ev.offset);
             isHeld = song->parts[(size_t) ev.part].midi;   // a part switched off in MIDI Out sends nothing
             if (isHeld) midi.addEvent (juce::MidiMessage::noteOn (ch, ev.pitch, (juce::uint8) ev.velocity), ev.offset);
+            heldAt[(size_t) ev.part][(size_t) ev.pitch] = samplesDone + ev.offset;
             if (song->parts[(size_t) ev.part].sound)
             {
                 stopVoice (ev.part, ev.pitch);
@@ -312,6 +418,7 @@ void Engine::process (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, 
     }
     render (buffer, at, numSamples);
 
+    samplesDone += numSamples; lastBlock = numSamples;
     reportHostPlaying = hostPlaying;
     reportPreview = playing && ! hostPlaying;
     reportBpm = tempo;
@@ -322,27 +429,34 @@ Engine::Capture Engine::getCapture()
 {
     Capture c;
     const juce::SpinLock::ScopedLockType lock (captureLock);
-    const double rate = sampleRate / decim;
-    if (ringCount < (size_t) (rate * 4.0))
+    const double rate = sampleRate / decim, beatSec = 60.0 / captureBpm;
+    if (ringCount < (size_t) (rate * 4.0) || marks.empty())
         return c;
-    // where the oldest kept sample sits on the host's timeline, then skip to the next bar line
-    const double firstPpq = captureStartPpq + (double) (ringTotal - ringCount) / rate * captureBpm / 60.0;
+    // the segment holding the oldest kept sample, and its song beat; then skip to the next bar line
+    const size_t oldest = ringTotal - ringCount;
+    size_t m = 0; while (m + 1 < marks.size() && marks[m + 1].total <= oldest) ++m;
+    const double firstPpq = marks[m].ppq + (double) (oldest - marks[m].total) / rate / beatSec;
     double skip = positiveMod (-firstPpq, captureBeatsPerBar);
     if (skip > captureBeatsPerBar - 0.02) skip = 0;
-    const auto skipSamples = (size_t) std::llround (skip * 60.0 / captureBpm * rate);
+    const auto skipSamples = (size_t) std::llround (skip * beatSec * rate);
     if (ringCount <= skipSamples + (size_t) (rate * 4.0))
         return c;
-    const size_t n = ringCount - skipSamples;
+    const size_t n = ringCount - skipSamples, startTotal = oldest + skipSamples;
     const size_t first = (ringWrite + ring.size() - ringCount + skipSamples) % ring.size();
-    c.samples.resize (n);
+    c.samples.resize (n); c.side.resize (n);
     double sum = 0;
     for (size_t i = 0; i < n; ++i)
     {
         c.samples[i] = ring[(first + i) % ring.size()];
+        c.side[i] = ringSide[(first + i) % ring.size()];
         sum += (double) c.samples[i] * c.samples[i];
     }
     c.sampleRate = rate;
     c.startBeat = std::round (firstPpq + skip);
+    c.segments.push_back ({ 0.0, c.startBeat });
+    for (size_t k = m + 1; k < marks.size(); ++k)
+        if (marks[k].total > startTotal)
+            c.segments.push_back ({ (double) (marks[k].total - startTotal) / rate, marks[k].ppq });
     c.bpm = captureBpm;
     c.beatsPerBar = captureBeatsPerBar;
     c.level = std::sqrt (sum / (double) n);

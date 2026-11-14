@@ -333,7 +333,8 @@
     return shape;
   }
   const THIRD_IN_BASS = 0.03, FIFTH_IN_BASS = 0.07, BASS_WEIGHT = 0.15;
-  const positionWeight = beat => (beat % 4 === 0 ? 1 : beat % 2 === 0 ? 1.6 : 2.4);
+  let BPB = 4;   // beats in a bar for the analysis running now
+  const positionWeight = beat => (beat % BPB === 0 ? 1 : BPB % 2 === 0 && beat % (BPB / 2) === 0 ? 1.6 : 2.4);
   const changeCost = detail => { const simple = 1 - clamp01(detail); return 0.012 + 0.45 * simple * simple; };
 
   function track(candidates, chroma, bass, detail) {
@@ -474,7 +475,8 @@
     if (heard.tri === 'sus') return d === 0 || d === 4 ? 0.9 : 0.6;
     return 0.3;
   }
-  function detectKey(heard, chromaSum, phrase) {
+  function detectKey(heard, chromaSum, phrase, kt) {
+    kt = kt || {};   // weights that differ from the defaults (on a host grid, the first chord says nothing)
     // heard: one { root, tri } per sounding beat; phrase: the same for the 4 bars the progression is read from
     const scored = [];
     const first = phrase.length ? phrase[0] : null, last = phrase.length ? phrase[phrase.length - 1] : null;
@@ -493,7 +495,7 @@
         if (a.root === (r + 7) % 12 && a.tri === 'maj' && b.root === r && b.tri === tonicTri) resolves = 1;
       }
       const corr = correlation(chromaSum, minor ? MINOR_PROFILE : MAJOR_PROFILE, r);
-      const score = cover + 0.35 * share + 0.12 * opens + 0.05 * cadence + 0.12 * resolves + 0.2 * corr - (s > 1 ? 0.05 : 0);
+      const score = cover + (kt.share ?? 0.35) * share + (kt.opens ?? 0.12) * opens + 0.05 * cadence + 0.12 * resolves + (kt.corr ?? 0.2) * corr - (s > 1 ? (kt.mode ?? 0.05) : 0);
       scored.push({ root: r, scaleIdx: s, score, cover });
     }
     scored.sort((a, b) => b.score - a.score || a.scaleIdx - b.scaleIdx || a.root - b.root);
@@ -504,12 +506,13 @@
   function analyse(samples, sampleRate, opts) {
     const o = opts || {};
     const notes = [];
+    BPB = o.grid && o.grid.beatsPerBar > 0 ? Math.max(2, Math.min(12, Math.round(+o.grid.beatsPerBar))) : 4;
     const fallback = why => ({ bpm: 120, bpmConfidence: 0, beatOffsetSec: 0, key: { root: 9, scaleIdx: 0 }, keyConfidence: 0,
       spec: [{ d: 0, len: 8 }, { d: 0, len: 8 }], confidence: [0, 0], chordConfidence: 0, bassPcs: new Array(16).fill(-1), notes: [why] });
     if (!samples || !samples.length || !(sampleRate > 0)) return fallback('no audio to listen to');
     if (!(samples instanceof Float32Array)) { try { samples = Float32Array.from(samples); } catch (e) { return fallback('no audio to listen to'); } }
-    const sr = Number(sampleRate), total = Math.min(samples.length, Math.floor(sr * 60));
-    if (samples.length > total) notes.push('only the first 60 seconds were listened to');
+    const limitSec = o.grid ? 70 : 60, sr = Number(sampleRate), total = Math.min(samples.length, Math.floor(sr * limitSec));
+    if (samples.length > total) notes.push(`only the first ${limitSec} seconds were listened to`);
     let any = false;
     for (let i = 0; i < total; i++) { const v = samples[i]; if (v !== v) return fallback('the audio holds invalid samples'); if (v > 1e-5 || v < -1e-5) any = true; }
     if (!any) return fallback('the audio is silent');
@@ -521,9 +524,17 @@
     // tempo and beats
     // A known grid (inside a DAW: the host's tempo, and the song beat the audio starts on) replaces the estimate.
     const grid = o.grid && o.grid.bpm > 0 && Number.isFinite(o.grid.bpm) ? o.grid : null;
-    const on = grid ? null : onsetEnvelopes(xO, srO);
+    const on = onsetEnvelopes(xO, srO);
     let bpm = 0, bpmConfidence = 0, beatOffsetSec = 0, periodSec = 0.5, first = 0, gridK0 = 0;
     const tempo = on ? estimateTempo(on) : null;
+    let audioBpm = 0;
+    if (grid && tempo) {
+      // the beat the audio itself keeps, against the project's (octaves and a third apart count as the same beat)
+      audioBpm = Math.round(on.frameRate * 60 / tempo.period * 100) / 100;
+      const g = +grid.bpm, ratio = audioBpm / g, near = [0.5, 2 / 3, 1, 1.5, 2].some(r => Math.abs(ratio / r - 1) < 0.012);
+      if (!near && tempo.comb(tempo.period, 4) > 0.3) notes.push(`the audio on this track seems to run at ${audioBpm} BPM, not the project's ${g}: the chords may drift against it`);
+      else audioBpm = 0;
+    }
     if (grid) {
       bpm = Math.min(Math.max(+grid.bpm, 20), 400); periodSec = 60 / bpm; bpmConfidence = 1;
       const at0 = Math.max(0, +grid.firstBeatSec || 0);
@@ -569,26 +580,38 @@
     for (let k = 0; first + k * periodSec < seconds - 0.25 * periodSec && k < 400; k++) beatTimes.push(first + k * periodSec);
     if (beatTimes.length < 2) return fallback('the audio is too short to find chords in');
     const all = analyseBeats(xC, srC, beatTimes, periodSec);
+    // the middle's own chroma: what is sounding where, and how passes compare, are judged on it alone
+    const mid = all.chroma.map(c => Float64Array.from(c));
+    if (o.side && o.side.length >= total) {
+      const xS = decimate(o.side instanceof Float32Array ? o.side : Float32Array.from(o.side), total, dC), side = analyseBeats(xS, srC, beatTimes, periodSec);
+      for (let k = 0; k < beatTimes.length; k++) {
+        // Only on beats where the music sounds in the middle too, and where the side carries a large share of it (a
+        // part spread out of phase). Quiet beats are left alone: their side is reverb tails, which would read as chords.
+        const loudMid = all.energy[k] > 0.05 * all.loudestStep, ratio = all.energy[k] > 1e-9 ? side.energy[k] / all.energy[k] : 0;
+        const w = loudMid ? Math.min(1, Math.max(0, (ratio - 0.5) / 0.5)) : 0;
+        if (w > 0.05) for (let i = 0; i < 12; i++) all.chroma[k][i] += w * side.chroma[k][i];
+      }
+    }
     if (Math.abs(all.tuningCents) > 12) notes.push(`the recording is tuned ${Math.abs(Math.round(all.tuningCents))} cents ${all.tuningCents > 0 ? 'sharp' : 'flat'}; the chords were read against its own tuning`);
 
     // which beat starts the bar: chords mostly change on bar lines, and when that does not decide, the first
     // beat that sounds does
     // A beat sounds when it is loud enough and its notes stand out as the music's usually do (hiss or room
     // noise before the music starts spreads over all twelve).
-    const G = beatTimes.length, loud = t => !isSilent(all.chroma[t]) && all.energy[t] > 0.05 * all.loudestStep;
-    const top4 = t => Array.from(all.chroma[t]).sort((a, b) => b - a).slice(0, 4).reduce((a, b) => a + b, 0);
+    const G = beatTimes.length, loud = t => !isSilent(mid[t]) && all.energy[t] > 0.05 * all.loudestStep;
+    const top4 = t => Array.from(mid[t]).sort((a, b) => b - a).slice(0, 4).reduce((a, b) => a + b, 0);
     const clear = []; for (let t = 0; t < G; t++) if (loud(t)) clear.push(top4(t));
     clear.sort((a, b) => a - b);
     const clearEnough = clear.length ? 0.7 * clear[clear.length >> 1] : 0, sounding = t => loud(t) && top4(t) >= clearEnough;
     let firstSound = 0; while (firstSound < G - 1 && !sounding(firstSound)) firstSound++;
     const nov = new Float64Array(G);
-    for (let t = firstSound + 1; t < G; t++) if (sounding(t) && sounding(t - 1)) nov[t] = 0.75 * (1 - cosineOf(all.chroma[t - 1], all.chroma[t])) + 0.25 * (1 - cosineOf(all.bass[t - 1], all.bass[t]));
+    for (let t = firstSound + 1; t < G; t++) if (sounding(t) && sounding(t - 1)) nov[t] = 0.75 * (1 - cosineOf(mid[t - 1], mid[t])) + 0.25 * (1 - cosineOf(all.bass[t - 1], all.bass[t]));
     const barScore = [0, 0, 0, 0], barCount = [0, 0, 0, 0];
     for (let t = firstSound + 1; t < G; t++) { barScore[t % 4] += nov[t]; barCount[t % 4]++; }
     let novTop = 0;
     for (let p = 0; p < 4; p++) { barScore[p] = barCount[p] ? barScore[p] / barCount[p] : 0; if (barScore[p] > novTop) novTop = barScore[p]; }
-    let down, N, chroma, bass;
-    if (grid) ({ down, N, chroma, bass } = gridWindow());
+    let down, N, chroma, bass, downSec; const gridInfo = {};
+    if (grid) ({ down, N, chroma, bass, downSec } = gridWindow());
     else {
     let barPhase = firstSound % 4, barBest = -1;
     for (let p = 0; p < 4; p++) { const v = (novTop > 1e-9 ? barScore[p] / novTop : 0) + (p === firstSound % 4 ? 0.3 : 0); if (v > barBest) { barBest = v; barPhase = p; } }
@@ -601,42 +624,90 @@
     N = lastSound - down + 1; chroma = all.chroma.slice(down, down + N); bass = all.bass.slice(down, down + N);
     }
     if (!N) return fallback('nothing with a pitch was heard');
-    beatOffsetSec = Math.max(0, beatTimes[down]);
+    beatOffsetSec = Math.max(0, grid ? downSec : beatTimes[down]);
 
     // The 16 beats of the song's 4-bar grid that hold what was heard: song beats 16w ... 16w+15. When the music
     // repeats every 4 bars, every pass is averaged (steadier chords); when it does not (a longer progression),
     // only the latest pass is read, and the notes say which bars.
     function gridWindow() {
-      const songBeat = k => Math.round(+grid.startBeat || 0) - gridK0 + k, bpb = Math.max(1, Math.round(+grid.beatsPerBar || 4));
-      const windows = new Map();
-      for (let k = 0; k < G; k++) {
-        const b = songBeat(k), w = Math.floor(b / 16), p = mod(b, 16);
-        if (!windows.has(w)) windows.set(w, new Array(16).fill(-1));
-        windows.get(w)[p] = k;
-      }
+      const segs = Array.isArray(grid.segments) && grid.segments.length ? grid.segments.map(s => ({ sec: +s.sec || 0, beat: +s.beat || 0 })).sort((a, b) => a.sec - b.sec)
+        : [{ sec: 0, beat: (+grid.startBeat || 0) - gridK0 }];
+      const songBeat = k => { const tk = beatTimes[k]; let s = segs[0]; for (const x of segs) if (x.sec <= tk + 0.25 * periodSec) s = x; return Math.round(s.beat + (tk - s.sec) / periodSec); };
+      const bpb = BPB, W4 = 4 * bpb, W8 = 8 * bpb;
       const soundingIn = ks => ks.filter(k => k >= 0 && sounding(k)).length;
-      let full = [...windows.entries()].filter(([, ks]) => ks.every(k => k >= 0) && soundingIn(ks) >= 8).sort((a, b) => a[0] - b[0]);
-      if (!full.length) {   // less than one whole pass: what there is, at its place in the grid
-        const best = [...windows.entries()].sort((a, b) => soundingIn(b[1]) - soundingIn(a[1]))[0];
-        if (!best || !soundingIn(best[1])) return { N: 0 };
-        full = [best];
-        notes.push('less than 4 bars were heard on the grid: play the track a little longer and listen again for every chord');
+      const like = (ks, ref) => { let s = 0, n = 0; for (let p = 0; p < ks.length; p++) if (ks[p] >= 0 && ref[p] >= 0 && sounding(ks[p]) && sounding(ref[p])) { s += cosineOf(mid[ks[p]], mid[ref[p]]); n++; } return n ? s / n : 1; };
+      const windowsOf = len => {
+        const w = new Map();
+        for (let k = 0; k < G; k++) { const b = songBeat(k), i = Math.floor(b / len); if (!w.has(i)) w.set(i, new Array(len).fill(-1)); w.get(i)[mod(b, len)] = k; }
+        return w;
+      };
+      // a stretch counts as whole when at most two of its beats are missing (the audio may end on its last beat)
+      const fullOf = (w, len) => [...w.entries()].filter(([, ks]) => ks.filter(k => k >= 0).length >= len - 2 && soundingIn(ks) >= len / 2).sort((a, b) => a[0] - b[0]);
+      let len = W4, windows = windowsOf(W4), full = fullOf(windows, W4);
+      // the chord heard on each beat (best plain triad by chroma and bass), to compare passes by what they say
+      const FC = freeCandidates().filter(f => !f.seventh);
+      const labelOf = k => {
+        if (k < 0 || !sounding(k)) return -1;
+        const c = mid[k], b = all.bass[k]; let norm = 0, bn = 0; for (let i = 0; i < 12; i++) { norm += c[i] * c[i]; bn += b[i] * b[i]; }
+        norm = Math.sqrt(norm) || 1; bn = Math.sqrt(bn) || 1;
+        let best = -1e9, lab = -1;
+        for (const f of FC) { let d = 0; for (let i = 0; i < 12; i++) d += c[i] * f.shape[i]; const s = d / norm + 0.35 * b[f.root] / bn + f.prior; if (s > best) { best = s; lab = f.root * 4 + (f.tri === 'min' ? 1 : f.tri === 'dim' ? 2 : f.tri === 'aug' ? 3 : 0); } }
+        return lab;
+      };
+      const labels = []; for (let k = 0; k < G; k++) labels.push(labelOf(k));
+      const mismatch = lag => { let n = 0, m = 0; for (let k = 0; k + lag < G; k++) if (labels[k] >= 0 && labels[k + lag] >= 0) { n++; if (labels[k] !== labels[k + lag]) m++; } return n >= 8 ? m / n : -1; };
+      // how alike two stretches are, on the beats both have (at least 8 sounding beats in common)
+      const overlap = (a, b) => { let n = 0; for (let p = 0; p < a.length; p++) if (a[p] >= 0 && b[p] >= 0 && sounding(a[p]) && sounding(b[p])) n++; return n; };
+      const ws = [...windows.entries()].sort((a, b) => a[0] - b[0]);
+      const next = [], skip = [];
+      for (const [w, ks] of ws) {
+        const a = windows.get(w - 1), b = windows.get(w - 2);
+        if (a && overlap(ks, a) >= 8) next.push(like(ks, a));
+        if (a && b && overlap(ks, b) >= 8 && overlap(ks, a) >= 8) skip.push([like(ks, b), like(ks, a)]);
       }
-      const latest = full[full.length - 1][1];
-      const like = (ks, ref) => { let s = 0, n = 0; for (let p = 0; p < 16; p++) if (ks[p] >= 0 && ref[p] >= 0 && sounding(ks[p]) && sounding(ref[p])) { s += cosineOf(all.chroma[ks[p]], all.chroma[ref[p]]); n++; } return n ? s / n : 1; };
-      const used = full.filter(([, ks]) => like(ks, latest) >= 0.8);
-      if (used.length < full.length) {
-        const w = full[full.length - 1][0];
-        notes.push(`the progression seems longer than 4 bars: these are bars ${Math.floor(16 * w / bpb) + 1}-${Math.floor(16 * (w + 1) / bpb)} of your song`);
-      } else if (used.length > 1) notes.push(`${used.length} passes of the 4 bars were heard and averaged`);
+      const m16 = mismatch(W4), m32 = mismatch(W8);
+      gridInfo.next = next; gridInfo.skip = skip; gridInfo.m16 = m16; gridInfo.m32 = m32;
+      // 8 bars when the music changes from one 4-bar stretch to the next: plainly (a stretch unlike the one before),
+      // or subtly (each stretch is more like the one two before than the one just before, and the chords heard
+      // repeat after 32 beats much more than after 16)
+      const plain = next.some(v => v < 0.8);
+      const mean = a => a.reduce((x, y) => x + y, 0) / a.length;
+      const subtle = skip.length > 0 && mean(skip.map(([s, n]) => s - n)) >= 0.02 && m32 >= 0 && m16 - m32 >= 0.12;
+      // The progression is built from every stretch that agrees with the latest one, beat by beat at its place in the
+      // cycle: a stretch that starts late (an intro bar, a part played once) is completed by the next one.
+      const pick = (wins, L) => {
+        const list = [...wins.entries()].filter(([, ks]) => soundingIn(ks) >= 4).sort((a, b) => a[0] - b[0]);
+        if (!list.length) return null;
+        let li = list.length - 1; while (li > 0 && soundingIn(list[li][1]) < L / 2) li--;   // the latest stretch heard well
+        const latest = list[li][1];
+        const used = list.filter(([, ks]) => overlap(ks, latest) < 4 || like(ks, latest) >= 0.8);
+        let covered = 0; for (let p = 0; p < L; p++) if (used.some(([, ks]) => ks[p] >= 0 && sounding(ks[p]))) covered++;
+        return { list, latest, latestW: list[li][0], used, covered };
+      };
+      let sel = pick(windows, W4);
+      if (plain || subtle) {
+        const s32 = pick(windowsOf(W8), W8);
+        if (s32 && s32.covered >= W8 - 2) { len = W8; sel = s32; }
+        else notes.push('the progression seems longer than 4 bars: play 8 whole bars and listen again to read all of it');
+      }
+      if (!sel) return { N: 0 };
+      if (sel.covered < len - 2) notes.push(`less than ${len / bpb} bars were heard on the grid: play the track a little longer and listen again for every chord`);
+      const used = sel.used, latest = sel.latest;
+      if (used.length < sel.list.length) {
+        const w = sel.latestW;
+        notes.push(`the progression changes over more than ${len / bpb} bars: these are bars ${Math.floor(len * w / bpb) + 1}-${Math.floor(len * (w + 1) / bpb)} of your song`);
+      } else if (used.length > 1 && full.length > 1) notes.push(`${used.length} passes of the ${len / bpb} bars were heard and averaged`);
       const ch = [], ba = [];
-      for (let p = 0; p < 16; p++) {
+      for (let p = 0; p < len; p++) {
         const c = new Float64Array(12), b = new Float64Array(12); let n = 0;
         for (const [, ks] of used) { const k = ks[p]; if (k < 0 || !sounding(k)) continue; for (let i = 0; i < 12; i++) { c[i] += all.chroma[k][i]; b[i] += all.bass[k][i]; } n++; }
         if (n) for (let i = 0; i < 12; i++) { c[i] /= n; b[i] /= n; }
         ch.push(c); ba.push(b);
       }
-      return { down: latest[0] >= 0 ? latest[0] : 0, N: 16, chroma: ch, bass: ba };
+      // where the cycle starts: the time of the latest stretch's first place (it may lie before the audio; then a cycle later)
+      const p0 = latest.findIndex(k => k >= 0), k0 = latest[p0];
+      let start = beatTimes[k0] - p0 * periodSec; while (start < -1e-6) start += len * periodSec;
+      return { down: k0, downSec: start, N: len, chroma: ch, bass: ba };
     }
 
     // what is heard before a key is known
@@ -646,10 +717,13 @@
     for (let t = 0; t < N; t++) { if (freeTrack.silent[t]) continue; heard.push(heardAt(t)); for (let i = 0; i < 12; i++) chromaSum[i] += chroma[t][i]; }
     if (!heard.length) return fallback('nothing with a pitch was heard');
     // the 16 beats the progression is read from; shorter audio is looped (in whole bars when it has any)
-    const loopLen = N >= 16 ? 16 : N >= 4 ? N - (N % 4) : N, at = t => t % loopLen;
-    if (N < 16) notes.push(`only ${N} beat${N === 1 ? '' : 's'} of audio after the first downbeat: ${loopLen === N ? 'they were' : `the first ${loopLen} were`} looped to fill 4 bars`);
-    const phrase = []; for (let t = 0; t < Math.min(16, loopLen); t++) if (!freeTrack.silent[t]) phrase.push(heardAt(t));
-    const keys = detectKey(heard, chromaSum, phrase), key = { root: keys[0].root, scaleIdx: keys[0].scaleIdx };
+    const LEN = grid ? N : 16, MAXCH = LEN > 4 * BPB ? 16 : 8;
+    const loopLen = N >= LEN ? LEN : N >= BPB ? N - (N % BPB) : N, at = t => t % loopLen;
+    if (N < LEN) notes.push(`only ${N} beat${N === 1 ? '' : 's'} of audio after the first downbeat: ${loopLen === N ? 'they were' : `the first ${loopLen} were`} looped to fill 4 bars`);
+    const phrase = []; for (let t = 0; t < Math.min(LEN, loopLen); t++) if (!freeTrack.silent[t]) phrase.push(heardAt(t));
+    // (on the host's grid the window starts on the song's 4-bar grid, which is often but not always where the progression
+    // starts: its first chord counts for a third of what it does in a file; measured best for songs on and off the grid)
+    const keys = detectKey(heard, chromaSum, phrase, grid ? { opens: 0.04 } : null), key = { root: keys[0].root, scaleIdx: keys[0].scaleIdx };
     const samePitches = (a, b) => { const A = SCALES[a.scaleIdx].st.map(x => (x + a.root) % 12).sort().join(), B = SCALES[b.scaleIdx].st.map(x => (x + b.root) % 12).sort().join(); return A === B; };
     const rival = keys.find(k => k !== keys[0] && !(k.root === keys[0].root && k.scaleIdx > 1 && keys[0].scaleIdx <= 1));
     const keyConfidence = clamp01(0.25 + 4 * (keys[0].score - rival.score)) * clamp01(keys[0].cover);
@@ -657,21 +731,21 @@
 
     // the chords a spec can say in that key, over the 16 beats
     const cands = keyCandidates(key.root, key.scaleIdx, chordTonesOf(o)), c16 = [], b16 = [];
-    for (let t = 0; t < 16; t++) { c16.push(chroma[at(t)]); b16.push(bass[at(t)]); }
+    for (let t = 0; t < LEN; t++) { c16.push(chroma[at(t)]); b16.push(bass[at(t)]); }
     const tr = track(cands, c16, b16, 0.75);
     let runs = runsOf(tr).map(r => ({ ...r, confidence: confidenceOf(tr, r) }));
     // a spec holds at most 8 chords: the least certain short ones give way to the chord before them
     let merged = 0;
-    while (runs.length > 8) {
+    while (runs.length > MAXCH) {
       let w = 1; for (let i = 2; i < runs.length; i++) { const a = runs[i], b = runs[w]; if (a.end - a.first < b.end - b.first || (a.end - a.first === b.end - b.first && a.confidence < b.confidence)) w = i; }
       runs[w - 1].end = runs[w].end; runs.splice(w, 1); merged++;
     }
-    if (merged) notes.push(`the chords change more often than a progression of 8 can hold: ${merged} short chord${merged === 1 ? ' was' : 's were'} left out`);
-    if (runs.length === 1) runs = [{ ...runs[0], end: 8 }, { ...runs[0], first: 8 }];
+    if (merged) notes.push(`the chords change more often than a progression of ${MAXCH} can hold: ${merged} short chord${merged === 1 ? ' was' : 's were'} left out`);
+    if (runs.length === 1) runs = [{ ...runs[0], end: LEN / 2 }, { ...runs[0], first: LEN / 2 }];
 
     // how much better a chord from outside the key would have fitted each beat
-    const outside = new Float64Array(16);
-    for (let t = 0; t < 16; t++) {
+    const outside = new Float64Array(LEN);
+    for (let t = 0; t < LEN; t++) {
       if (tr.silent[t]) continue;
       let norm = 0; for (let i = 0; i < 12; i++) norm += c16[t][i] * c16[t][i];
       norm = Math.sqrt(norm);
@@ -686,29 +760,37 @@
       if (cd.el.q) el.q = cd.el.q;
       if (cd.el.ext) el.ext = cd.el.ext;
       const inv = cd.bassChoices[st.i].inv; if (inv) el.inv = inv;
-      if (el.len <= 2 && r.first % 4 !== 0 && (el.len === 1 || inv)) el.sub = true;       // a passing chord
+      if (el.len <= 2 && r.first % BPB !== 0 && (el.len === 1 || inv)) el.sub = true;       // a passing chord
       let worst = 0, sil = 0;
       for (let t = r.first; t < r.end; t++) { worst += outside[t]; if (tr.silent[t]) sil++; }
       worst /= el.len;
       let conf = r.confidence;
-      if (worst > 0.1) { approximated.add(Math.floor(r.first / 4) + 1); conf *= 0.5; }
-      if (sil === el.len) quiet.add(Math.floor(r.first / 4) + 1);
+      if (worst > 0.1) { approximated.add(Math.floor(r.first / BPB) + 1); conf *= 0.5; }
+      if (sil === el.len) quiet.add(Math.floor(r.first / BPB) + 1);
       spec.push(el); confidence.push(Math.round(conf * 1000) / 1000);
     }
     for (const b of approximated) notes.push(`a chord outside the key was approximated in bar ${b}`);
     for (const b of quiet) notes.push(`nothing with a pitch sounds in part of bar ${b}: the chord there is carried over`);
 
     const bassPcs = [];
-    for (let t = 0; t < 16; t++) {
+    for (let t = 0; t < LEN; t++) {
       let top = -1, v = 0; for (let i = 0; i < 12; i++) if (b16[t][i] > v) { v = b16[t][i]; top = i; }
       bassPcs.push(v > 0.3 ? top : -1);
     }
+    // how much the sound has pitch at all: per beat, the share of the three strongest notes in all twelve
+    // (chords and bass put most of it in three notes; drums and noise spread it out)
+    let tonal = 0, tonalN = 0;
+    for (let t = 0; t < LEN; t++) { const c = Array.from(c16[t]), s = c.reduce((a, b) => a + b, 0); if (!(s > 1e-9)) continue; c.sort((a, b) => b - a); tonal += (c[0] + c[1] + c[2]) / s; tonalN++; }
+    const tonality = tonalN ? Math.round(tonal / tonalN * 1000) / 1000 : 0;
+    // drums or noise only: no chords to read (measured: drum loops 0.31-0.36, mastered songs with chords 0.36 and up)
+    const pitched = !(tonality < 0.34 || (tonality < 0.37 && keyConfidence < 0.4));
+    if (!pitched) notes.push('no chords were heard: the audio seems to be drums or noise only');
     let cc = 0; spec.forEach((el, i) => { cc += confidence[i] * el.len; });
-    const chordConfidence = Math.round(clamp01(cc / 16) * (0.5 + 0.5 * keyConfidence) * 1000) / 1000;
+    const chordConfidence = Math.round(clamp01(cc / LEN) * (0.5 + 0.5 * keyConfidence) * 1000) / 1000;
     if (bpmConfidence < 0.35 && tempo && !grid) notes.push('the beat is not steady or not clear: tempo and chord timing may be off');
     return { bpm, bpmConfidence: Math.round(bpmConfidence * 1000) / 1000, beatOffsetSec: Math.round(beatOffsetSec * 10000) / 10000,
       key, keyConfidence: Math.round(keyConfidence * 1000) / 1000, spec, confidence, chordConfidence, bassPcs, notes,
-      tuningCents: Math.round(all.tuningCents * 10) / 10 };
+      tuningCents: Math.round(all.tuningCents * 10) / 10, tonality, pitched, audioBpm, gridInfo };
   }
 
   const M1D1Listen = Object.freeze({ analyse, SCALES: Object.freeze(SCALES.map(s => Object.freeze({ name: s.name, st: Object.freeze(s.st.slice()) }))) });
