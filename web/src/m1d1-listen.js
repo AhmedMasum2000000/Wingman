@@ -602,7 +602,10 @@
     const top4 = t => Array.from(mid[t]).sort((a, b) => b - a).slice(0, 4).reduce((a, b) => a + b, 0);
     const clear = []; for (let t = 0; t < G; t++) if (loud(t)) clear.push(top4(t));
     clear.sort((a, b) => a - b);
-    const clearEnough = clear.length ? 0.7 * clear[clear.length >> 1] : 0, sounding = t => loud(t) && top4(t) >= clearEnough;
+    // dullBeat (set when the grid is read): beats of a 4-bar stretch with far less pitch than the rest of the
+    // recording (a drums-only intro or break) are left out of the chords
+    let dullBeat = null;
+    const clearEnough = clear.length ? 0.7 * clear[clear.length >> 1] : 0, soundsAtAll = t => loud(t) && top4(t) >= clearEnough, sounding = t => soundsAtAll(t) && !(dullBeat && dullBeat[t]);
     let firstSound = 0; while (firstSound < G - 1 && !sounding(firstSound)) firstSound++;
     const nov = new Float64Array(G);
     for (let t = firstSound + 1; t < G; t++) if (sounding(t) && sounding(t - 1)) nov[t] = 0.75 * (1 - cosineOf(mid[t - 1], mid[t])) + 0.25 * (1 - cosineOf(all.bass[t - 1], all.bass[t]));
@@ -634,6 +637,17 @@
         : [{ sec: 0, beat: (+grid.startBeat || 0) - gridK0 }];
       const songBeat = k => { const tk = beatTimes[k]; let s = segs[0]; for (const x of segs) if (x.sec <= tk + 0.25 * periodSec) s = x; return Math.round(s.beat + (tk - s.sec) / periodSec); };
       const bpb = BPB, W4 = 4 * bpb, W8 = 8 * bpb;
+      // How much of each 4-bar stretch's sound is in its three strongest notes. A stretch well below the best one
+      // (drums only, while the rest has chords) says nothing about the chords: its beats are left out.
+      {
+        const share = k => { const c = Array.from(mid[k]), t = c.reduce((a, b) => a + b, 0); if (!(t > 1e-9)) return 0; c.sort((a, b) => b - a); return (c[0] + c[1] + c[2]) / t; };
+        const by = new Map(); for (let k = 0; k < G; k++) { if (!soundsAtAll(k)) continue; const w = Math.floor(songBeat(k) / W4); if (!by.has(w)) by.set(w, []); by.get(w).push(k); }
+        const tonal = [...by.entries()].filter(([, ks]) => ks.length >= 4).map(([w, ks]) => [w, ks.reduce((a, k) => a + share(k), 0) / ks.length]);
+        const best = Math.max(0, ...tonal.filter(([w]) => by.get(w).length >= W4 / 2).map(x => x[1]));
+        const dull = tonal.filter(([, v]) => v < 0.5 && v < 0.8 * best).map(x => x[0]);
+        gridInfo.tonal = tonal.map(([w, v]) => w + ":" + v.toFixed(2)).join(" ");
+        if (dull.length && dull.length < tonal.length) { dullBeat = new Uint8Array(G); for (const w of dull) for (const k of by.get(w)) dullBeat[k] = 1; gridInfo.dull = dull; }
+      }
       const soundingIn = ks => ks.filter(k => k >= 0 && sounding(k)).length;
       const like = (ks, ref) => { let s = 0, n = 0; for (let p = 0; p < ks.length; p++) if (ks[p] >= 0 && ref[p] >= 0 && sounding(ks[p]) && sounding(ref[p])) { s += cosineOf(mid[ks[p]], mid[ref[p]]); n++; } return n ? s / n : 1; };
       const windowsOf = len => {
@@ -696,7 +710,7 @@
       if (used.length < sel.list.length) {
         const w = sel.latestW;
         notes.push(`the progression changes over more than ${len / bpb} bars: these are bars ${Math.floor(len * w / bpb) + 1}-${Math.floor(len * (w + 1) / bpb)} of your song`);
-      } else if (used.length > 1 && full.length > 1) notes.push(`${used.length} passes of the ${len / bpb} bars were heard and averaged`);
+      } else { const passes = used.filter(([, ks]) => soundingIn(ks) >= len / 2).length; if (passes > 1 && full.length > 1) notes.push(`${passes} passes of the ${len / bpb} bars were heard and averaged`); }
       const ch = [], ba = [];
       for (let p = 0; p < len; p++) {
         const c = new Float64Array(12), b = new Float64Array(12); let n = 0;
@@ -726,7 +740,7 @@
     const keys = detectKey(heard, chromaSum, phrase, grid ? { opens: 0.04 } : null), key = { root: keys[0].root, scaleIdx: keys[0].scaleIdx };
     const samePitches = (a, b) => { const A = SCALES[a.scaleIdx].st.map(x => (x + a.root) % 12).sort().join(), B = SCALES[b.scaleIdx].st.map(x => (x + b.root) % 12).sort().join(); return A === B; };
     const rival = keys.find(k => k !== keys[0] && !(k.root === keys[0].root && k.scaleIdx > 1 && keys[0].scaleIdx <= 1));
-    const keyConfidence = clamp01(0.25 + 4 * (keys[0].score - rival.score)) * clamp01(keys[0].cover);
+    let keyConfidence = clamp01(0.25 + 4 * (keys[0].score - rival.score)) * clamp01(keys[0].cover);
     if (keyConfidence < 0.6) notes.push(`the key is not certain: ${NOTE[rival.root]} ${SCALES[rival.scaleIdx].name} fits nearly as well${samePitches(rival, keys[0]) ? ' (it uses the same notes)' : ''}`);
 
     // the chords a spec can say in that key, over the 16 beats
@@ -782,15 +796,37 @@
     let tonal = 0, tonalN = 0;
     for (let t = 0; t < LEN; t++) { const c = Array.from(c16[t]), s = c.reduce((a, b) => a + b, 0); if (!(s > 1e-9)) continue; c.sort((a, b) => b - a); tonal += (c[0] + c[1] + c[2]) / s; tonalN++; }
     const tonality = tonalN ? Math.round(tonal / tonalN * 1000) / 1000 : 0;
-    // drums or noise only: no chords to read (measured: drum loops 0.31-0.36, mastered songs with chords 0.36 and up)
-    const pitched = !(tonality < 0.34 || (tonality < 0.37 && keyConfidence < 0.4));
+    // drums or noise only: no chords to read (measured: drum loops 0.31-0.36, mastered songs with chords 0.36 and up).
+    // A kick whose pitch sweeps can reach 0.46; what it gives fits no key: weak key, and in half the bars or more a
+    // chord from outside the key fits better (every song of the test corpus: none).
+    const offKey = approximated.size / Math.max(1, Math.ceil(LEN / BPB));
+    const pitched = !(tonality < 0.34 || (tonality < 0.37 && keyConfidence < 0.4) || (tonality < 0.5 && keyConfidence < 0.45 && offKey >= 0.5));
     if (!pitched) notes.push('no chords were heard: the audio seems to be drums or noise only');
+    // A tuned kick (an 808) or one held bass note: the same single note is the strongest on every beat, and next to
+    // it only its own overtones (its fifth). That tells neither the chords nor major from minor. Harmony moves its
+    // strongest note across the loop, or sounds other notes too (even a one-chord vamp has its third).
+    // Measured: 808 loops 7-38, one held bass note about 20, one-chord vamps with bass and drums 126 and up.
+    const topCount = new Array(12).fill(0), prof = new Array(12).fill(0); let beatsWithPitch = 0;
+    for (let t = 0; t < LEN; t++) {
+      const c = c16[t]; let top = 0, v = 0; for (let i = 0; i < 12; i++) if (c[i] > v) { v = c[i]; top = i; }
+      if (!(v > 1e-9)) continue;
+      // a beat counts by how much of its sound is in its strongest note: a snare or hats between kicks hardly count
+      let sum = 0; for (let i = 0; i < 12; i++) sum += c[i];
+      const w = v / sum;
+      topCount[top] += w; beatsWithPitch += w; for (let i = 0; i < 12; i++) prof[i] += w * c[i] / v;
+    }
+    const lone = topCount.indexOf(Math.max(...topCount)), tops = topCount.filter(k => k >= 0.15 * beatsWithPitch).length;
+    let others = 0; for (let i = 0; i < 12; i++) if (i !== 0 && i !== 7) others += prof[(lone + i) % 12];
+    others = prof[lone] > 0 ? 100 * others / prof[lone] : 0;
+    const oneNote = pitched && beatsWithPitch > 0 && tops <= 1 && others < 60;
+    if (oneNote) { keyConfidence = Math.min(keyConfidence, 0.3); notes.push(`only one note sounds (${NOTE[lone]}), like a tuned kick or a held bass note: the key and chords are a guess`); }
     let cc = 0; spec.forEach((el, i) => { cc += confidence[i] * el.len; });
-    const chordConfidence = Math.round(clamp01(cc / LEN) * (0.5 + 0.5 * keyConfidence) * 1000) / 1000;
+    const chordConfidence = Math.round(clamp01(cc / LEN) * (0.5 + 0.5 * keyConfidence) * (oneNote ? 0.5 : 1) * 1000) / 1000;
     if (bpmConfidence < 0.35 && tempo && !grid) notes.push('the beat is not steady or not clear: tempo and chord timing may be off');
     return { bpm, bpmConfidence: Math.round(bpmConfidence * 1000) / 1000, beatOffsetSec: Math.round(beatOffsetSec * 10000) / 10000,
       key, keyConfidence: Math.round(keyConfidence * 1000) / 1000, spec, confidence, chordConfidence, bassPcs, notes,
-      tuningCents: Math.round(all.tuningCents * 10) / 10, tonality, pitched, audioBpm, gridInfo };
+      tuningCents: Math.round(all.tuningCents * 10) / 10, tonality, pitched, oneNote, audioBpm, gridInfo,
+      spread: { tops, others: Math.round(others), offKey: Math.round(offKey * 100) / 100 } };
   }
 
   const M1D1Listen = Object.freeze({ analyse, SCALES: Object.freeze(SCALES.map(s => Object.freeze({ name: s.name, st: Object.freeze(s.st.slice()) }))) });

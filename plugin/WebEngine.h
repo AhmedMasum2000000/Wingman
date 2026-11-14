@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <deque>
@@ -69,17 +70,21 @@ private:
     void releasePart (int part, juce::MidiBuffer& midi, int offset);
     // After a start, a seek, a loop or new notes: what should be sounding at `from` (started before it and still
     // going) is made to sound, notes that should not are released, and notes already right are left alone.
-    void reconcile (const Song& song, std::array<bool, 3> parts, double from, juce::MidiBuffer& midi);
+    // restrike: after a jump, a note struck before the last two blocks is struck again (the music came round to it);
+    // after an edit, a note still wanted keeps sounding.
+    void reconcile (const Song& song, std::array<bool, 3> parts, double from, juce::MidiBuffer& midi, bool restrike);
+    bool voiceOn (int part, int pitch) const;
 
     double sampleRate = 44100.0;
     std::atomic<const Song*> current { nullptr };
-    std::deque<std::shared_ptr<Song>> keepAlive;   // message thread: songs the audio thread may still read
+    std::deque<std::shared_ptr<Song>> keepAlive;   // message thread: the current song and the one the audio thread uses
+    std::atomic<const Song*> inUse { nullptr };      // published by the audio thread before it reads a song
 
     std::atomic<bool> previewRequest { false };
     std::atomic<double> previewStartBeat { 0.0 }, previewTempo { 120.0 };
     std::atomic<int> previewTicket { 0 };
     int previewSeen = 0;
-    bool previewRunning = false, wasPlaying = false;
+    bool previewRunning = false, wasPlaying = false, wasHostClock = false;
     double previewBeat = 0.0, expectedBeat = -1.0;
 
     std::array<Voice, 32> voices;
@@ -88,7 +93,9 @@ private:
     std::array<std::array<juce::int64, 128>, 3> heldAt {};   // when each was struck, in samples processed
     juce::int64 samplesDone = 0; int lastBlock = 0;
     std::array<int, 3> heldChannel { 2, 1, 3 };
-    const Song* lastSong = nullptr;
+    const Song* lastSong = nullptr;   // only compared, never read: the previous song's parts are kept in prevParts
+    std::array<Part, 3> prevParts;    // a copy, in storage reserved up front (no allocation on the audio thread)
+    bool havePrev = false;
 
     // capture: mid and side, decimated to about 22 kHz, written while the host plays
     juce::SpinLock captureLock;
@@ -101,6 +108,10 @@ private:
     float decimSum = 0, decimSide = 0;
     double captureBpm = 120, captureBeatsPerBar = 4;
     void captureReset (double ppq, double bpm, double beatsPerBar);
+    // what a block could not apply while the interface held the capture: a new recording, and loop marks (at their place
+    // in the gap, counted in input samples)
+    bool pendRestart = false; double pendPpq = 0, pendBpm = 120, pendBpb = 4;
+    struct PendMark { int at; double ppq; }; std::array<PendMark, 32> pendMarks {}; int numPend = 0;
     void capturePush (float mid, float side);
 };
 } // namespace m1d1

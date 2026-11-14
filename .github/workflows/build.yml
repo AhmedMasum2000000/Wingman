@@ -44,6 +44,15 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
+      - name: Test the analyser and the generator (the plugin page's JavaScript)
+        shell: bash
+        run: |
+          cd web/src
+          node test-gen.js
+          node test-listen.js
+          node test-grid.js
+          node test-grid2.js
+
       - name: Validate the VST3 with pluginval
         shell: bash
         run: |

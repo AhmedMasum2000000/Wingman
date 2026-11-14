@@ -54,5 +54,27 @@ let failures = 0; const check = (ok, msg) => { console.log((ok ? 'ok    ' : 'FAI
   const r2 = Listen.analyse(s.samples, s.sr, { gen: Gen, grid: { bpm: 122, firstBeatSec: 0, startBeat: 0, beatsPerBar: 4 } });
   check(r2.audioBpm === 0, 'the same audio in a 122 BPM project: no warning');
 }
+// 5. a song that starts with 12 bars of drums only: the drums alone give no chords; once the song plays, the drums-only
+//    bars are left out (a 4-bar progression, not 8)
+{
+  const c = { prog: G.P([0, 4], [5, 4], [2, 4], [6, 4]), bpm: 150, startBeat: 0, beats: 200, root: 9, scaleIdx: 0, drums: true, seed: 7, intro: 48 };
+  const s = G.song(c), grid = { bpm: c.bpm, firstBeatSec: 0, startBeat: 0, beatsPerBar: 4 };
+  const upTo = beat => s.samples.slice(0, Math.round(beat * 60 / c.bpm * s.sr));
+  for (const end of [17.8, 35.3, 47.5]) { const r = Listen.analyse(upTo(end), s.sr, { gen: Gen, grid }); check(r.pitched === false, `drums only, ${end} beats: no chords (tonality ${r.tonality}, key ${r.keyConfidence})`); }
+  for (const end of [70.3, 105.3]) {
+    const r = Listen.analyse(upTo(end), s.sr, { gen: Gen, grid }), p = played(r), L = p.length; let ok = 0; for (let b = 48; b < 64; b++) if (p[mod(b, L)].root === s.rootAt(b)) ok++;
+    check(r.pitched && L === 16 && ok === 16 && !r.notes.some(n => /longer than/.test(n)), `drums intro then the song, ${end} beats: ${L} beats read, ${ok}/16 roots right`);
+  }
+}
+// 6. a tuned kick (an 808) on every beat and nothing else: one note, so the key and chords are flagged as a guess
+{
+  const sr = 22050, bpm = 140, beats = 48, n = Math.ceil(beats * 60 / bpm * sr), x = new Float32Array(n);
+  for (let b = 0; b < beats; b++) { const i0 = Math.round(b * 60 / bpm * sr); for (let i = 0; i < sr && i0 + i < n; i++) { const t = i / sr, f = 55 * (1 + 1.5 * Math.exp(-t * 40)); x[i0 + i] += 0.8 * Math.tanh(2.5 * Math.sin(2 * Math.PI * f * t) * Math.exp(-t / 0.5)); } }
+  const r = Listen.analyse(x, sr, { gen: Gen, grid: { bpm, firstBeatSec: 0, startBeat: 0, beatsPerBar: 4 } });
+  check(r.oneNote === true && r.keyConfidence <= 0.3 && r.notes.some(m => /only one note/.test(m)), `808 on every beat: one note (${r.oneNote}), key confidence ${r.keyConfidence}`);
+  const c = { prog: G.P([0, 16]), bpm: 140, startBeat: 0, beats: 48, root: 5, scaleIdx: 1, drums: true, seed: 140 };
+  const v = G.song(c), rv = Listen.analyse(v.samples, v.sr, { gen: Gen, grid: { bpm: c.bpm, firstBeatSec: 0, startBeat: 0, beatsPerBar: 4 } });
+  check(rv.pitched && !rv.oneNote, `a one-chord vamp with bass and drums is still read as chords`);
+}
 console.log(failures ? `${failures} failed` : 'all passed');
 process.exitCode = failures ? 1 : 0;

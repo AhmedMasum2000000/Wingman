@@ -16,9 +16,13 @@ When the page finds JUCE's bridge (`window.__JUCE__`) it runs in plugin mode:
 | `getCaptureInfo` | How many beats of the track have been heard so far (for listening on its own) |
 
 Inside the DAW the page starts empty (no example chords, no MIDI) and listens to the track on its own the
-first time the host has played one whole 4-bar stretch of the song's grid. It reads again each time 4 more
-bars have played, while nothing was changed by hand, until two reads agree (an intro gives way to the song,
-an 8-bar progression is read whole). Drums or noise only are not read as chords. Track audio is analysed on the
+first time the host has played one whole 4-bar stretch of the song's grid. When it hears no chords yet (a drums
+intro) it tries again after 4 more bars. It reads again each time 4 more bars have played, while nothing was
+changed by hand (any edit, Open audio, the example or Reset ends this), until two reads agree (an intro gives
+way to the song, an 8-bar progression is read whole); a later read updates the chords in place. After Reset it
+waits for 4 new bars. Drums or noise only are not read as chords: a kick whose pitch sweeps gives notes that fit
+no key, and 4-bar stretches with far less pitch than the rest (a drums-only intro or break) are left out. A
+tuned kick or one held bass note alone (`oneNote`) is shown with a warning and low confidence. Track audio is analysed on the
 host's grid (`M1D1Listen.analyse(..., { grid: { bpm, firstBeatSec, startBeat, beatsPerBar } })`): the host's
 tempo and time signature, and the 4 bars (or 8, when the music changes from one 4-bar stretch to the next)
 that line up with the song's grid, so the parts the plugin plays at `ppq mod length` are the chords at that

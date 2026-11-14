@@ -291,7 +291,9 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
 .ana.empty .sub, .ana.empty .scale, .ana.empty .facts .val { opacity: .15; }
 .ana.empty #tempoRail { opacity: .25; pointer-events: none; }
 .hint { gap: 10px; align-content: center; }
-.hint .flat { pointer-events: auto; margin: 0 auto; color: var(--hot); }
+/* text and button side by side, above the transport knob in the middle of the panel */
+.hint:not([hidden]) { grid-auto-flow: column; justify-content: center; align-content: start; padding-top: 3px; }
+.hint .flat { pointer-events: auto; margin: 0; color: var(--hot); white-space: nowrap; }
 .wait { position: absolute; left: 0; right: 0; top: 34px; bottom: 8px; display: grid; place-items: center; border: 1px dashed #2a2a2a;
   font: 500 10px/1 var(--f-ui); letter-spacing: .3em; text-transform: uppercase; color: var(--label); }
 .card.affected { box-shadow: inset 0 1.5px 0 rgba(255,255,255,.2), inset 0 0 0 1px rgba(253,61,0,.4), 0 1px 0 rgba(0,0,0,.6), 0 0 26px rgba(253,61,0,.12), 0 18px 36px rgba(0,0,0,.45); }
@@ -733,7 +735,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   const rangeName = i => RANGES[i].map(m => SHARP[m % 12] + (Math.floor(m / 12) - 1)).join(' – ');
   const names = l => l.map(i => PNAME[i]).join(l.length > 2 ? ', ' : ' and ');
   let hasAudio = true, isExample = true, buffer = null, fileName = 'Example loop', overview = null;
-  let heard = null, sessionNote = '';   // sessionNote: what a restored session's chords came from   // what the analyser found in the loaded file: { bpm, start (s, first downbeat), res }
+  let heard = null, sessionNote = '', sessionName = '';   // sessionNote: what a restored session's chords came from   // what the analyser found in the loaded file: { bpm, start (s, first downbeat), res }
   const regionSecs = () => (heard ? Math.min(buffer.duration - heard.start, heard.beats * 60 / heard.bpm) : buffer.duration);
   let stage1 = true, stage2 = true, stage3 = true, stage4 = true, scanning = false, scanT = 0, reveal = 1, wReveal = 1;
   let hoverChord = -1, hoverX = -1;
@@ -751,7 +753,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
 
   // Inside the M1D1 plugin the page talks to the plugin through JUCE's bridge (window.__JUCE__).
   const HOST = !!(window.__JUCE__ && window.__JUCE__.backend);
-  let hostRun = false, hostCall = null, hostB64 = null, hostModeChanged = null;
+  let hostRun = false, hostCall = null, hostB64 = null, hostModeChanged = null, hostTookChords = null, previewDirty = false;
   let meter = { num: 4, den: 4, beats: 4 };   // beats: quarter notes in a bar   // hostRun: the DAW is playing
   // ---------- audio: one clock. The take and each MIDI part are layers that sound alone or together, always in sync ----------
   let ctx = null, master = null, aL = null, aR = null, source = null, playing = false, offset = 0;
@@ -846,6 +848,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   // jump to a new place (or follow a tempo change) without losing sync between the layers
   function resync(at) {
     if (!clock.running) { offset = at; return; }
+    if (Math.abs(at - elapsed()) > .05) previewDirty = true;   // a jump (not a re-schedule in place): the plugin's preview follows
     clock.t0 = ctx.currentTime + .03 - at;
     if (playing) { killBus(bus.take); bus.take = newBus(); }
     partOn.forEach((on, i) => { if (on) { killBus(bus.part[i]); bus.part[i] = newBus(); } });
@@ -1025,7 +1028,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   function tempoFromX(cx) { const r = rail.getBoundingClientRect(), l = 10 * scale, rr = r.width - 10 * scale; return 60 + Math.min(1, Math.max(0, (cx - r.left - l) / (rr - l))) * 120; }
   const railT = v => Math.min(180, Math.max(60, v));
   // exact: the host's tempo (or the grid the track was read on), kept to 1/100 BPM and not limited to the rail's range
-  function setTempo(v, exact) { v = exact ? Math.min(999, Math.max(20, v)) : Math.min(180, Math.max(60, v)); T.x.t = railT(v); const n = exact ? Math.round(v * 100) / 100 : Math.round(v); if (n !== tempo) { if (clock.running) { const b = beatPos(); tempo = n; clock.t0 = ctx.currentTime - b * 60 / tempo; if (!T.drag) resync(elapsed()); } else { offset = offset * tempo / n; tempo = n; } tempoText(); waveDirty = true; } T.dirty = true; }
+  function setTempo(v, exact) { v = exact ? Math.min(999, Math.max(20, v)) : Math.min(180, Math.max(60, v)); T.x.t = railT(v); const n = exact ? Math.round(v * 100) / 100 : Math.round(v); if (n !== tempo) { previewDirty = true; if (clock.running) { const b = beatPos(); tempo = n; clock.t0 = ctx.currentTime - b * 60 / tempo; if (!T.drag) resync(elapsed()); } else { offset = offset * tempo / n; tempo = n; } tempoText(); waveDirty = true; } T.dirty = true; }
   rail.addEventListener('pointerdown', e => { rail.setPointerCapture(e.pointerId); T.drag = true; setTempo(tempoFromX(e.clientX)); interest(); });
   rail.addEventListener('pointermove', e => { if (rail.hasPointerCapture(e.pointerId)) setTempo(tempoFromX(e.clientX)); });
   const endDrag = () => { if (!T.drag) return; T.drag = false; if (!T.hover) tReach(false); T.x.t = railT(tempo); T.dirty = true; if (clock.running) resync(elapsed()); };
@@ -1455,6 +1458,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     if (m === 'generate') { isExample = true; hasAudio = true; $('#fileName').textContent = 'Generated arrangement'; $('#exampleChip').hidden = true; $('#hint').hidden = true; }
     else if (buffer) { isExample = false; hasAudio = true; $('#fileName').textContent = fileName.slice(0, 40); $('#exampleChip').hidden = false; }
     else if (exampleOn) { isExample = true; hasAudio = true; $('#fileName').textContent = 'Example loop'; $('#exampleChip').hidden = false; $('#exampleChip').textContent = 'Example'; }
+    else if (sessionNote) { isExample = true; hasAudio = true; $('#fileName').textContent = sessionName || 'Saved session'; $('#exampleChip').hidden = true; }   // chords from a saved session
     else { isExample = false; hasAudio = false; $('#fileName').textContent = 'No audio'; $('#hint').hidden = false; }
     const ready = m === 'generate' || hasAudio; stage1 = stage2 = stage3 = stage4 = ready;
     [1, 2, 3, 4].forEach(n => setStage(n, ready)); overview = null; offset = 0; reveal = 0; wReveal = 0; revealing = true;
@@ -1462,7 +1466,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   }
   $$('.modesw button').forEach(b => b.addEventListener('click', () => { setMode(b.dataset.mode); if (HOST && typeof hostModeChanged === 'function') hostModeChanged(); }));
   function clearAll() {
-    runId++; stopAll(); offset = 0; exampleOn = false; hasAudio = mode === 'generate'; isExample = mode === 'generate'; buffer = null; heard = null; detected.root = 9; detected.scale = 0; overview = null; stage1 = stage2 = stage3 = stage4 = false; scanning = false;
+    sessionNote = ''; sessionName = ''; runId++; stopAll(); offset = 0; exampleOn = false; hasAudio = mode === 'generate'; isExample = mode === 'generate'; buffer = null; heard = null; detected.root = 9; detected.scale = 0; overview = null; stage1 = stage2 = stage3 = stage4 = false; scanning = false;
     [1, 2, 3, 4].forEach(n => setStage(n, false));
     $('#fileName').textContent = 'No audio'; $('#exampleChip').hidden = true; $('#hint').hidden = false; $('#timeNow').textContent = '0:00';
     spec = SPECS[0]; setIdx = 0; history = []; PT = freshPT(); keyRoot = detected.root; scaleIdx = detected.scale; rebuild(); knobs.forEach(k => { if (k.steps) k.sync(); }); $('#btnUndo').disabled = true; knobs.forEach(k => k.set(k.def, true)); setTempo(124); T.x.t = 124;
@@ -1491,9 +1495,15 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   async function loadFile(f) {
     if (!f) return; audio(); pause();
     try {
+      const hadChords = stage4 || exampleOn || !!heard || mode === 'generate';
       buffer = await ctx.decodeAudioData(await f.arrayBuffer()); if (mode === 'generate') setMode('extract'); hasAudio = true; isExample = false; offset = 0; overview = null; $('#hint').hidden = true;
       fileName = f.name.replace(/\.[^.]+$/, ''); $('#fileName').textContent = fileName.slice(0, 40);
       const fileTempoBefore = tempo, ok = listenTo(buffer);
+      if (!ok && !hadChords) {
+        buffer = null; hasAudio = false; $('#hint').hidden = false; $('#exampleChip').hidden = true;
+        $('#fileName').textContent = `${fileName.slice(0, 28)} · no chords heard in it (drums only?)`; ui(); return;
+      }
+      if (ok && hostTookChords) hostTookChords();
       if (HOST && ok && heard && Math.abs(heard.bpm / fileTempoBefore - 1) > 0.01 && hostRun !== undefined)
         $('#fileName').textContent = `${fileName.slice(0, 28)} · ${heard.bpm} BPM: the parts play at FL Studio's tempo, from bar 1`;
       ui(); run(); play();
@@ -1539,7 +1549,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   $('#portOk').addEventListener('click', closeDialogs);
   $$('.overlay').forEach(o => o.addEventListener('click', e => { if (e.target === o) closeDialogs(); }));
   addEventListener('keydown', e => { if (e.key === 'Escape') closeDialogs(); });
-  $('#btnExample').addEventListener('click', () => { exampleOn = true; isExample = true; hasAudio = true; buffer = null; heard = null; detected.root = 9; detected.scale = 0; overview = null; $('#hint').hidden = true; $('#fileName').textContent = 'Example loop'; $('#exampleChip').hidden = false; $('#exampleChip').textContent = 'Example'; run(); });
+  $('#btnExample').addEventListener('click', () => { sessionNote = ''; sessionName = ''; exampleOn = true; isExample = true; hasAudio = true; buffer = null; heard = null; detected.root = 9; detected.scale = 0; overview = null; $('#hint').hidden = true; $('#fileName').textContent = 'Example loop'; $('#exampleChip').hidden = false; $('#exampleChip').textContent = 'Example'; run(); });
 
   function ui() {
     const b = $('#playBtn'), snd = anyOn(); b.setAttribute('aria-pressed', String(snd)); b.setAttribute('aria-label', snd ? 'Stop (Space)' : 'Play (Space)'); b.title = snd ? 'Stop (Space)' : mode === 'generate' ? 'Play the three parts (Space)' : 'Play your audio (Space)';
@@ -2074,10 +2084,14 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     // Inside the DAW M1D1 starts empty: no example chords and no MIDI until it has heard the track (or you open a
     // file, load the example or switch to Generate). The first time the DAW plays, it listens to the track on its own.
     let waitingForTrack = false;
+    // heardBeats: song beats the DAW has played since M1D1 opened (from its transport reports)
+    let rereads = 0, lastReadAt = 0, busy = false, heardBeats = 0, lastHostBeat = null, nextTry = 0, noChordsYet = false, lastReadSig = '', readUserSig = null, notBefore = 0;
     const hintText = $('#hint span');
-    const startEmpty = () => {
+    // fromReset: what the track played before Reset is not what you want read again, so it waits for 4 new bars
+    const startEmpty = fromReset => {
       if (mode !== 'extract') return;
-      clearAll(); waitingForTrack = true;
+      clearAll(); waitingForTrack = true; rereads = 0; nextTry = 0; noChordsYet = false; lastReadSig = ''; readUserSig = null;
+      notBefore = fromReset === true ? heardBeats + 16.5 : 0;
       if (hintText) hintText.textContent = 'Play your project: M1D1 listens to the mixer track it sits on · or drop audio here';
       $('#fileName').textContent = 'Waiting for your track';
     };
@@ -2090,8 +2104,11 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
       const s = JSON.stringify(song); if (s !== sentSong) { sentSong = s; call('setSong', s); }
     };
     // a part's Play while the DAW is stopped: the plugin runs its own clock from where the page is
-    let previewSent = false;
-    setInterval(() => { const want = partOn.some(Boolean) && !hostRun; if (want !== previewSent) { previewSent = want; call('setPreview', want, beatPos(), tempo); } }, 60);
+    let previewSent = false, previewHold = 0;
+    setInterval(() => {
+      const want = partOn.some(Boolean) && !hostRun;
+      if (want !== previewSent || (want && previewDirty)) { previewSent = want; previewDirty = false; previewHold = performance.now() + 300; call('setPreview', want, beatPos(), tempo); }
+    }, 60);
     // the plugin reports where the music is ~30 times a second; the page's clock follows it
     be.addEventListener('transport', ev => {
       audio();
@@ -2103,7 +2120,10 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
         if (Math.abs(ev.bpm - tempo) > .005 && !T.drag) { setTempo(ev.bpm, true); T.x.t = railT(tempo); }
         if (!hostRun) { hostRun = true; clock.running = true; ui(); }
       } else if (hostRun) { hostRun = false; offset = elapsed(); if (!partOn.some(Boolean)) clock.running = false; ui(); }
-      if ((ev.host || ev.preview) && clock.running) { const want = ctx.currentTime - ev.beat * 60 / tempo; if (Math.abs(want - clock.t0) > .03) clock.t0 = want; }
+      if (ev.host && lastHostBeat !== null) { const d = ev.beat - lastHostBeat; if (d > 0 && d < 2) heardBeats += d; }
+      lastHostBeat = ev.host ? ev.beat : null;
+      const settling = !ev.host && (previewDirty || performance.now() < previewHold);   // the plugin has not had the new place yet
+      if ((ev.host || ev.preview) && clock.running && !settling) { const want = ctx.currentTime - ev.beat * 60 / tempo; if (Math.abs(want - clock.t0) > .03) clock.t0 = want; }
     });
 
     // drag a part into FL Studio: the plugin writes the .mid file and starts a real Windows drag
@@ -2135,51 +2155,70 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
       const f32 = f32of(r.b64), side = r.side ? f32of(r.side) : null; audio();
       const buf = ctx.createBuffer(1, f32.length, r.sr); buf.copyToChannel(f32, 0);
       if (mode === 'generate') setMode('extract');
-      const gridOf = { bpm: r.bpm, firstBeatSec: 0, startBeat: r.startBeat, beatsPerBar: r.beatsPerBar, segments: r.segments };
+      // in 7/8 a bar can start half-way through a beat: the first whole beat comes that much later
+      const firstWhole = Math.ceil(r.startBeat - 1e-6), gridOf = { bpm: r.bpm, firstBeatSec: Math.max(0, firstWhole - r.startBeat) * 60 / r.bpm, startBeat: r.startBeat, beatsPerBar: r.beatsPerBar, segments: r.segments };
       const opts = { grid: gridOf, side };
       let res = null; try { res = M1D1Listen.analyse(f32, r.sr, { gen: M1D1Gen, ...opts }); } catch (e) { res = null; }
-      if (!res || res.pitched === false) {
-        // listening on its own keeps waiting (an intro of drums only); a press says what was heard
+      if (!res || res.pitched === false || (quiet && res.oneNote)) {
+        // listening on its own keeps waiting (an intro of drums only), or keeps the chords it already shows;
+        // a press says what was heard
+        if (quiet === 'again') return false;
         if (quiet) { waitingForTrack = true; return false; }
         $('#fileName').textContent = 'No chords heard on this track: is it drums only? Put M1D1 on a track with chords or bass';
         react('thinking', 2); return false;
       }
       // listening again on its own: nothing to do while what it hears has not changed
-      if (quiet === 'again' && heard && JSON.stringify(res.spec) === JSON.stringify(spec.map(e => { const { cf, ...x } = e; return x; })) && res.key.root === keyRoot && res.key.scaleIdx === scaleIdx) return 'same';
+      const sig = JSON.stringify([res.spec, res.key.root, res.key.scaleIdx]);
+      if (quiet === 'again' && sig === lastReadSig) return 'same';
+      lastReadSig = sig; readUserSig = null;
       listenTo(buf, opts, res);
       pause(); buffer = buf; hasAudio = true; isExample = false; offset = 0; overview = null; $('#hint').hidden = true;
-      fileName = 'Your track'; waitingForTrack = false;
+      fileName = 'Your track'; waitingForTrack = false; noChordsYet = false;
       const warn = res.notes.find(n => /not the project|less than .* bars were heard|seems longer than/.test(n));
       $('#fileName').textContent = warn ? warn[0].toUpperCase() + warn.slice(1) : `Your track · ${Math.round(r.secs * r.bpm / 60 / r.beatsPerBar)} bars heard`;
-      lastHeardBeats = r.secs * r.bpm / 60;
-      ui(); run(); return true;
+      lastReadAt = heardBeats;
+      // a read again on its own updates the chords in place (no new reveal, no gap in the MIDI)
+      if (quiet === 'again') { renderChords(true); applyDetail(true); changed([0, 1, 2]); syncStates(); ui(); }
+      else { ui(); run(); }
+      return true;
     }
     tb.addEventListener('click', () => { rereads = 0; listenToTrack(false); });
-    hostModeChanged = () => { if (mode === 'generate') waitingForTrack = false; else if (!buffer && !exampleOn) startEmpty(); };
+    hostModeChanged = () => { if (mode === 'generate') waitingForTrack = false; else if (!buffer && !exampleOn && !sessionNote) startEmpty(); };
     // listening on its own: once the DAW has played one whole 4-bar stretch of the song's grid
     // After the first read, M1D1 reads the track again each time 4 more bars have played (an intro gives way to the
     // song, an 8-bar progression gets read whole, passes are averaged), while nothing was changed by hand, until two
     // reads in a row agree or a minute was heard.
-    let rereads = 0, lastHeardBeats = 0, busy = false;
+    // what you changed by hand since the last read: a change ends the re-reads (your edit stays)
+    const userSig = () => JSON.stringify([spec, keyRoot, scaleIdx, setIdx, PT, knobs.map(k => k.v), midiParts]);
     setInterval(async () => {
       if (busy) return;
-      if (rereads > 0 && hostRun && mode === 'extract' && !history.length && !waitingForTrack) {
+      if (rereads > 0 && stage4 && readUserSig === null) readUserSig = userSig();   // what the read left, once shown
+      if (rereads > 0 && readUserSig !== null && userSig() !== readUserSig) rereads = 0;
+      if (rereads > 0 && hostRun && mode === 'extract' && !history.length && !waitingForTrack && stage4) {
+        if (heardBeats < lastReadAt + 4 * meter.beats) return;
         const info = await call('getCaptureInfo'); if (!info) return;
-        if (info.beats < lastHeardBeats + 4 * meter.beats) return;
         busy = true; const r = await listenToTrack('again'); busy = false;
+        if (r === true) readUserSig = null;
         if (r === 'same' || r === false || info.beats * 60 / tempo > 60) rereads = 0; else rereads--;
+        lastReadAt = heardBeats;
         return;
       }
       if (!waitingForTrack || !hostRun || mode !== 'extract') return;
       const info = await call('getCaptureInfo'); if (!info) return;
       const from = info.fromBeat, end = from + info.beats, win = Math.ceil(from / 16 - 1e-6) * 16, have = Math.max(0, end - win);
-      if (have >= 16.5) { waitingForTrack = false; busy = true; const ok = await listenToTrack(true); busy = false; if (!ok) waitingForTrack = true; else rereads = 8; }
-      else $('#fileName').textContent = `Listening to your track · ${Math.min(4, Math.floor(have / 4) + 1)} of 4 bars`;
+      const fresh = Math.max(0, Math.min(have, 16.5 - (notBefore - heardBeats)));   // after Reset: only what played since
+      if (fresh >= 16.5 && heardBeats >= nextTry) {
+        waitingForTrack = false; busy = true; const ok = await listenToTrack(true); busy = false;
+        // nothing with chords yet: try again after 4 more bars (not every moment)
+        if (!ok) { waitingForTrack = true; noChordsYet = true; nextTry = heardBeats + 4 * meter.beats; $('#fileName').textContent = 'Listening to your track · no chords heard yet'; }
+        else { rereads = 8; nextTry = 0; }
+      }
+      else if (!noChordsYet) $('#fileName').textContent = `Listening to your track · ${Math.min(4, Math.floor(fresh / 4) + 1)} of 4 bars`;
     }, 700);
     // anything else that brings chords ends the wait; Reset in Extract starts it again
-    $('#btnExample').addEventListener('click', () => { waitingForTrack = false; });
-    $('#btnOpen').addEventListener('click', () => { waitingForTrack = false; });
-    $('#resetYes').addEventListener('click', () => setTimeout(startEmpty, 0));
+    $('#btnExample').addEventListener('click', () => { waitingForTrack = false; rereads = 0; });
+    hostTookChords = () => { waitingForTrack = false; rereads = 0; };
+    $('#resetYes').addEventListener('click', () => setTimeout(() => startEmpty(true), 0));
 
     // the session is saved in the FL project and restored when it opens
     const stateNow = () => { const k = {}; knobs.forEach(q => { if (!q.steps) k[q.label] = q.v; });
@@ -2196,7 +2235,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
           Object.entries(st.knobs || {}).forEach(([l, v]) => { const q = knobs.find(q => q.label === l && !q.steps); if (q) q.set(v, true); });
           keyRoot = st.keyRoot; scaleIdx = st.scaleIdx; spec = st.spec; setIdx = st.setIdx ?? -1; PT = st.PT; history = [];
           rebuild(); knobs.forEach(q => { if (q.steps) q.sync(); }); setTempo(st.tempo || tempo, true); T.x.t = railT(tempo); $('#btnUndo').disabled = true;
-          if (st.ready) { sessionNote = st.note || ''; hasAudio = true; isExample = true; stage1 = stage2 = stage3 = stage4 = true; [1, 2, 3, 4].forEach(n => setStage(n, true)); $('#hint').hidden = true; $('#exampleChip').hidden = true; $('#fileName').textContent = st.name || 'Saved session'; }
+          if (st.ready) { exampleOn = st.note === 'Example loop'; sessionNote = st.note || ''; sessionName = st.name || 'Saved session'; hasAudio = true; isExample = true; stage1 = stage2 = stage3 = stage4 = true; [1, 2, 3, 4].forEach(n => setStage(n, true)); $('#hint').hidden = true; $('#exampleChip').hidden = true; $('#fileName').textContent = st.name || 'Saved session'; }
           renderChords(true); applyDetail(true); changed([0, 1, 2]); syncStates(); ui();
         }
       } catch (e) {}

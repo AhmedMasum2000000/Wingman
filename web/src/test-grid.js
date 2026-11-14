@@ -34,7 +34,7 @@ function song(c) {
   const chordAt = b => { let at = 0, sb = mod(b, L); for (const el of c.prog) { if (sb < at + el.len) return { el, first: b - (sb - at), len: el.len }; at += el.len; } };
   const rootAt = b => Gen.chordTones(chordAt(b).el, key).tones.root;
   for (let b = Math.floor(c.startBeat) - 4; b < c.startBeat + c.beats + 4; b++) {
-    const ch = chordAt(b); if (ch.first !== b) continue;
+    const ch = chordAt(b); if (ch.first !== b) continue; if (c.intro && b < c.intro) continue;   // intro: drums only before song beat c.intro
     const ct = Gen.chordTones(ch.el, key), t0 = (b - c.startBeat) * beat;
     if (c.only !== 'bass') for (const m0 of ct.notes) { let m = m0; while (m > 71) m -= 12; const hz = 440 * Math.pow(2, (m - 69) / 12); for (const cents of [-4, 4]) addTone(out, sr, t0, ch.len * beat, hz * Math.pow(2, cents / 1200), 0.05, 8, c.stabs ? pluckEnv : padEnv); }
     const bhz = 440 * Math.pow(2, (36 + ct.pcs[0] - 69) / 12);
