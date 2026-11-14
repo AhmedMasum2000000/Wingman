@@ -24,8 +24,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Get the WebView2 SDK (the M1D1 window is a WebView2 page)
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'nuget'
+          $pkg = Join-Path $dir 'Microsoft.Web.WebView2.1.0.1901.177'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Invoke-WebRequest 'https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.1901.177' -OutFile (Join-Path $dir 'webview2.zip')
+          Expand-Archive (Join-Path $dir 'webview2.zip') -DestinationPath $pkg -Force
+          if (-not (Test-Path (Join-Path $pkg 'build\native\include\WebView2.h'))) { throw 'WebView2 SDK not found in the package' }
+          "WEBVIEW2_DIR=$($dir -replace '\\','/')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
       - name: Configure
-        run: cmake -S . -B build
+        run: cmake -S . -B build -DJUCE_WEBVIEW2_PACKAGE_LOCATION="${{ env.WEBVIEW2_DIR }}"
 
       - name: Build
         run: cmake --build build --config Release --parallel

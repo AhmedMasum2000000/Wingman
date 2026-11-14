@@ -37,6 +37,17 @@ if not exist "%SRC%M1D1.vst3\" (
     goto fail
 )
 
+rem M1D1's window is a WebView2 page. WebView2 is part of Windows 11 and of current Windows 10.
+set "WV2=0"
+reg query "HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv >nul 2>&1 && set "WV2=1"
+reg query "HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv >nul 2>&1 && set "WV2=1"
+reg query "HKCU\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" /v pv >nul 2>&1 && set "WV2=1"
+if "%WV2%"=="0" (
+    echo NOTE: Microsoft Edge WebView2 Runtime was not found. M1D1's window needs it.
+    echo       Get it free from https://go.microsoft.com/fwlink/p/?LinkId=2124703 and install it.
+    echo.
+)
+
 rem FL Studio keeps the plugin file open while it runs, so it has to be closed.
 for %%P in (FL64.exe FL.exe "FL Studio.exe" M1D1.exe) do (
     tasklist /FI "IMAGENAME eq %%~P" 2>nul | find /i "%%~P" >nul && (

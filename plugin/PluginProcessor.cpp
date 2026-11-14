@@ -1,5 +1,8 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#if M1D1_WEB_UI
+ #include "WebEditor.h"
+#endif
 #include <cstring>
 
 using namespace backline;
@@ -120,6 +123,7 @@ void BacklineProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     chordMidi.ensureSize (4096);
     bassMidi.ensureSize (4096);
     haltPreviewAndTake();
+    webEngine.prepare (sampleRate, samplesPerBlock);
 }
 
 bool BacklineProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -152,6 +156,9 @@ void BacklineProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, 
     haltPreviewAndTake();
     juce::AudioProcessor::processBlockBypassed (buffer, midi);
     midi.clear();
+   #if M1D1_WEB_UI
+    webEngine.stopAll (midi);
+   #endif
     if (midiOutWasOn)
     {
         for (int ch = chordMidiChannel; ch <= bassMidiChannel; ++ch)
@@ -196,6 +203,12 @@ void BacklineProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         buffer.clear (ch, 0, numSamples);
     if (numSamples <= 0)
         return;
+   #if M1D1_WEB_UI
+    // The M1D1 interface: its parts, in time with the host (the earlier engine has no interface in this build).
+    webEngine.process (buffer, hostMidi, getPlayHead(), getTotalNumInputChannels());
+    midiOutWasOn = true;
+    return;
+   #endif
     const double sampleRate = currentSampleRate.load();
 
     // Transport: the host's when it provides musical time, otherwise our own clock at the manual
@@ -1490,6 +1503,11 @@ void BacklineProcessor::getStateInformation (juce::MemoryBlock& destData)
     xml.setAttribute ("playTake", playTake.load());
     xml.setAttribute ("preview", previewEnabled.load());
     xml.setAttribute ("gain", (double) previewGain.load());
+    {
+        const juce::ScopedLock lock (webLock);
+        if (webState.isNotEmpty()) xml.setAttribute ("webState", webState);
+        if (webSongJson.isNotEmpty()) xml.setAttribute ("webSong", webSongJson);
+    }
     copyXmlToBinary (xml, destData);
 }
 
@@ -1498,6 +1516,12 @@ void BacklineProcessor::setStateInformation (const void* data, int sizeInBytes)
     const auto xml = getXmlFromBinary (data, sizeInBytes);
     if (xml == nullptr || ! xml->hasTagName ("Backline"))
         return;
+    {
+        const juce::ScopedLock lock (webLock);
+        webState = xml->getStringAttribute ("webState");
+    }
+    if (const auto song = xml->getStringAttribute ("webSong"); song.isNotEmpty())
+        setWebSong (song);   // the parts play (and go out as MIDI) even before the window is opened
     previewEnabled = xml->getBoolAttribute ("preview", true);
     previewGain = (float) juce::jlimit (0.0, 1.0, xml->getDoubleAttribute ("gain", 0.7));
     manualBpm = juce::jlimit (minManualTempo, maxManualTempo, xml->getDoubleAttribute ("tempo", defaultTempo));
@@ -1567,6 +1591,25 @@ void BacklineProcessor::setStateInformation (const void* data, int sizeInBytes)
     setInstrument (Part::Bass, xml->getStringAttribute ("bassInstrument", instruments::builtInName));
 }
 
-juce::AudioProcessorEditor* BacklineProcessor::createEditor() { return new BacklineEditor (*this); }
+void BacklineProcessor::setWebSong (const juce::String& json)
+{
+    if (auto song = m1d1::parseSong (json))
+    {
+        {
+            const juce::ScopedLock lock (webLock);
+            webSongJson = json;
+        }
+        webEngine.setSong (std::move (song));
+    }
+}
+
+juce::AudioProcessorEditor* BacklineProcessor::createEditor()
+{
+   #if M1D1_WEB_UI
+    return new WebEditor (*this);
+   #else
+    return new BacklineEditor (*this);
+   #endif
+}
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new BacklineProcessor(); }

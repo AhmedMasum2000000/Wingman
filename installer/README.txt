@@ -1,5 +1,5 @@
 M1D1 for Windows (64-bit) - a plugin by ACND
-MIDI extractor and generator: audio in -> key, BPM, Camelot and chords -> MIDI for bass and chords.
+MIDI extractor and generator: audio in -> key, BPM, Camelot and chords -> MIDI for bass, chords and lead.
 
 WHAT IS IN THIS FOLDER
   Install.bat      Double-click to install everything (asks for administrator rights).
@@ -19,15 +19,23 @@ INSTALL
   3. Open FL Studio: Options > Manage plugins > Find plugins. M1D1 appears in the list.
 
 USE IT IN FL STUDIO
-  - Put M1D1 on the mixer insert of the audio you want to build around (or on a sampler channel),
-    or drop an audio file onto it. It finds the key, tempo and chords and writes MIDI parts.
-  - Drag a part (Bass or Chords) straight from M1D1 into the Playlist or the Piano roll.
+  - Put M1D1 on the mixer insert of the audio you want to build around.
+  - Extract: play your project for a few bars, then press LISTEN TO TRACK. Or press OPEN AUDIO
+    (or drop a WAV/MP3 on M1D1). It finds the key, tempo and chords and writes bass, chords and lead.
+  - Generate: pick a key, scale and tempo and M1D1 writes the parts for you.
+  - KEEP a part you like and press NEW or GENERATE: the other parts are rewritten around it.
+  - PLAY on a part (or the big Play button) previews it through FL Studio's mixer.
+    When FL Studio plays, M1D1 follows its tempo and position.
+  - Drag a part (the orange "bass.mid" tile) into the Playlist or the Piano roll, or press SAVE.
+  - Your parts and settings are saved with the FL Studio project.
+  M1D1's window uses Microsoft Edge WebView2, which comes with Windows 11 and current Windows 10.
+  If the window stays empty, install it from https://go.microsoft.com/fwlink/p/?LinkId=2124703
 
   Play M1D1's MIDI on any synth (MIDI out):
   1. Open M1D1's plugin window, click the cog at the top left (Plugin options), and in the MIDI
      section set "Output port" to a free number, for example 1.
   2. Load your synth (FLEX, Serum, a piano...). In its Plugin options, set "Input port" to the same number.
-  3. Chords come out on MIDI channel 1 and bass on channel 2. To play them on different sounds, load two
+  3. Chords come out on MIDI channel 1, bass on channel 2 and the lead melody on channel 3. To play them on different sounds, load two
      synths on the same port and set each one to listen to one channel, or use Patcher.
   4. Press Play in FL Studio. The synth plays M1D1's parts in time with your project.
 

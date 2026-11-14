@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "Backline.h"
+#include "WebEngine.h"
 #include "Instruments.h"
 
 // Threading: every public function except processBlock / processBlockBypassed may be called from
@@ -35,6 +36,13 @@ public:
     static constexpr int chordMidiChannel = 1, bassMidiChannel = 2;
     void setMidiOutEnabled (bool on) { midiOutEnabled.store (on); }
     bool isMidiOutEnabled() const { return midiOutEnabled.load(); }
+
+    // The M1D1 interface (WebEditor): the notes it sends are played by webEngine, and its session is kept here
+    // so it is saved in the host's project.
+    m1d1::Engine& getWebEngine() { return webEngine; }
+    void setWebSong (const juce::String& json);
+    void setWebState (const juce::String& state) { const juce::ScopedLock lock (webLock); webState = state; }
+    juce::String getWebState() const { const juce::ScopedLock lock (webLock); return webState; }
     double getTailLengthSeconds() const override { return 0.5; }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -318,7 +326,12 @@ private:
     bool midiOutWasOn = false; // audio thread only
     juce::AudioBuffer<float> synthBuffer, fadeBuffer;
 
+    m1d1::Engine webEngine;
+    juce::CriticalSection webLock;
+    juce::String webState, webSongJson;
+
     juce::ThreadPool worker { 1 }; // last, so it is stopped before anything its jobs touch is destroyed
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BacklineProcessor)
+
 };

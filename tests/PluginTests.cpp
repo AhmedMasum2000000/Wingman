@@ -1,6 +1,7 @@
 // End-to-end test of the plugin processor without a DAW: feeds audio with a fake transport,
 // then checks the analysis result, the preview sound, MIDI export and session save/restore.
 #include "../plugin/PluginEditor.h"
+#include <map>
 
 static int failures = 0;
 #define CHECK(cond) do { if (! (cond)) { std::printf ("FAIL line %d: %s\n", __LINE__, #cond); ++failures; } } while (false)
@@ -208,6 +209,7 @@ static juce::String chordNames (const BacklineProcessor& p)
 
 static void versionTwoTests();
 static void editorTests();
+static void webEngineTests();
 
 int main()
 {
@@ -527,6 +529,7 @@ int main()
 
     versionTwoTests();
     editorTests();
+    webEngineTests();
     testFolder().deleteRecursively();
 
     std::printf (failures == 0 ? "All plugin tests passed\n" : "%d check(s) failed\n", failures);
@@ -1461,5 +1464,93 @@ static void editorTests()
         CHECK (rig.processor.hasHostTransport());
         if (fields.size() == 1)
             CHECK (! fields.front()->isVisible());
+    }
+}
+
+//==============================================================================
+// The engine behind the M1D1 interface: the parts it is sent, played in time with the host.
+static void webEngineTests()
+{
+    const double sr = 48000.0; const int block = 480;   // 10 ms blocks
+    // a 4-beat loop: bass C2 on beat 0 (ch 2), chord C-E-G on beat 1 (ch 1), lead note on beat 2 (ch 3)
+    const juce::String json = R"({"loopBeats":4,"tempo":120,"parts":[
+        {"ch":2,"sound":true,"notes":[[0,1,36,100]]},
+        {"ch":1,"sound":false,"notes":[[1,1,60,90],[1,1,64,90],[1,1,67,90]]},
+        {"ch":3,"sound":false,"notes":[[2,0.5,72,80]]}]})";
+    auto song = m1d1::parseSong (json);
+    CHECK (song != nullptr && song->parts[1].notes.size() == 3 && song->parts[0].channel == 2);
+    CHECK (m1d1::parseSong ("not json") == nullptr);
+
+    m1d1::Engine engine;
+    engine.prepare (sr, block);
+    engine.setSong (song);
+    FakePlayHead head; head.bpm = 120.0;
+    juce::AudioBuffer<float> buf (2, block);
+    int ons[17] = {}, offs[17] = {}; std::map<int, int> heldNotes; float peak = 0;
+    std::vector<double> onBeats[17];
+    auto run = [&] (double seconds, bool hostPlays)
+    {
+        head.playing = hostPlays;
+        for (int done = 0; done < (int) (seconds * sr); done += block)
+        {
+            buf.clear();
+            for (int i = 0; i < block; ++i)   // some input, for the capture
+                buf.setSample (0, i, 0.1f * (float) std::sin (0.05 * (done + i)));
+            juce::MidiBuffer midi;
+            engine.process (buf, midi, &head, 2);
+            for (const auto m : midi)
+            {
+                const auto msg = m.getMessage();
+                if (msg.isNoteOn()) { ++ons[msg.getChannel()]; ++heldNotes[msg.getChannel() * 128 + msg.getNoteNumber()]; onBeats[msg.getChannel()].push_back (head.ppq + m.samplePosition * head.bpm / 60.0 / sr); }
+                if (msg.isNoteOff()) { ++offs[msg.getChannel()]; --heldNotes[msg.getChannel() * 128 + msg.getNoteNumber()]; }
+            }
+            peak = juce::jmax (peak, buf.getMagnitude (1, 0, block));   // channel 1 has no input: only the engine's sound
+            if (hostPlays) head.ppq += block * head.bpm / 60.0 / sr;
+        }
+    };
+    run (4.0, true);   // two loops at 120 BPM
+    CHECK (ons[2] == 2 && ons[1] == 6 && ons[3] == 2);   // each part on its own channel, once per loop
+    CHECK (std::abs (onBeats[1][0] - 1.0) < 0.02 && std::abs (onBeats[3][0] - 2.0) < 0.02 && std::abs (onBeats[2][1] - 4.0) < 0.02);
+    CHECK (peak > 0.02f);   // the bass part's Play is on: it sounds
+    run (0.05, false);      // host stops: nothing stays held
+    int stuck = 0; for (auto& [k, v] : heldNotes) stuck += v > 0 ? 1 : 0;
+    CHECK (stuck == 0);
+    CHECK (! engine.reportHostPlaying.load());
+
+    // a seek in the host releases held notes and carries on from the new place
+    head.ppq = 1.5; run (0.3, true); head.ppq = 0.0; run (0.3, true); run (0.05, false);
+    stuck = 0; for (auto& [k, v] : heldNotes) stuck += v > 0 ? 1 : 0;
+    CHECK (stuck == 0);
+
+    // the interface's Play while the host is stopped: the engine runs its own clock
+    for (auto& c : ons) c = 0;
+    engine.setPreview (true, 0.5, 120.0);
+    run (2.1, false);
+    CHECK (engine.reportPreview.load() && ons[1] == 3 && ons[3] == 1 && ons[2] == 1);   // one loop from beat 0.5
+    engine.setPreview (false, 0, 120.0);
+    run (0.05, false);
+    CHECK (! engine.reportPreview.load());
+
+    // only parts whose Play is on make sound; MIDI goes out for all of them
+    auto quiet = m1d1::parseSong (json.replace ("\"sound\":true", "\"sound\":false"));
+    engine.setSong (quiet); head.ppq = 0; run (0.3, true);   // the earlier bass note fades out first
+    peak = 0; run (2.0, true); run (0.05, false);
+    CHECK (peak < 1.0e-4f);
+
+    // the track's audio, kept while the host played, starting on a bar line
+    head.ppq = 0.7; run (6.0, true); run (0.05, false);
+    const auto cap = engine.getCapture();
+    CHECK (cap.sampleRate == 24000.0 && cap.samples.size() > (size_t) (4.0 * cap.sampleRate));
+    CHECK (std::abs ((double) cap.samples.size() / cap.sampleRate - (6.0 - (4.0 - 0.7) * 0.5)) < 0.05);
+
+    // the processor saves the interface's session and parts with the project, and plays them after loading
+    {
+        BacklineProcessor p;
+        p.setWebState ("{\"v\":1}");
+        p.setWebSong (json);
+        juce::MemoryBlock state; p.getStateInformation (state);
+        BacklineProcessor q;
+        q.setStateInformation (state.getData(), (int) state.getSize());
+        CHECK (q.getWebState() == "{\"v\":1}" && q.getWebEngine().hasSong());
     }
 }
