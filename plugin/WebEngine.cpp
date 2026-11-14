@@ -30,6 +30,7 @@ std::shared_ptr<Song> parseSong (const juce::String& json)
         auto& part = song->parts[(size_t) i];
         part.channel = juce::jlimit (1, 16, (int) p.getProperty ("ch", i == 1 ? 1 : i == 0 ? 2 : 3));
         part.sound = (bool) p.getProperty ("sound", false);
+        part.midi = (bool) p.getProperty ("midi", true);
         if (const auto* notes = p.getProperty ("notes", juce::var()).getArray())
             for (const auto& n : *notes)
             {
@@ -199,7 +200,16 @@ void Engine::process (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, 
         const juce::SpinLock::ScopedTryLockType lock (captureLock);
         if (lock.isLocked() && ! ring.empty())
         {
-            const bool jumped = hostPlaying && captureWasPlaying && std::abs (ppq - captureExpectedPpq) > std::max (0.01, 0.5 * blockBeats);
+            bool jumped = hostPlaying && captureWasPlaying && std::abs (ppq - captureExpectedPpq) > std::max (0.01, 0.5 * blockBeats);
+            if (jumped)
+            {
+                // A loop in the host (FL Studio's pattern loop, a looped playlist range) jumps back to a bar line from a
+                // bar line: the music carries on, so the recording does too, as if the song went on.
+                const auto onBar = [&] (double b) { const double r = positiveMod (b, beatsPerBar); return r < 0.05 || r > beatsPerBar - 0.05; };
+                const double span = captureExpectedPpq - ppq;
+                if (span > 0.5 && onBar (ppq) && onBar (captureExpectedPpq) && onBar (span))
+                    jumped = false;
+            }
             if (hostPlaying && (! captureWasPlaying || jumped || std::abs (bpm - captureBpm) > 0.01))
             {
                 ringWrite = ringCount = ringTotal = 0; decimCount = 0; decimSum = 0;
@@ -223,6 +233,9 @@ void Engine::process (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, 
                     }
                 }
                 captureExpectedPpq = ppq + blockBeats;
+                const double rate = sampleRate / decim;
+                capturedFromBeat = captureStartPpq + (double) (ringTotal - ringCount) / rate * captureBpm / 60.0;
+                capturedBeats = (double) ringCount / rate * captureBpm / 60.0;
             }
             captureWasPlaying = hostPlaying;
         }
@@ -282,8 +295,8 @@ void Engine::process (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi, 
         if (ev.on)
         {
             if (isHeld) midi.addEvent (juce::MidiMessage::noteOff (ch, ev.pitch), ev.offset);
-            midi.addEvent (juce::MidiMessage::noteOn (ch, ev.pitch, (juce::uint8) ev.velocity), ev.offset);
-            isHeld = true;
+            isHeld = song->parts[(size_t) ev.part].midi;   // a part switched off in MIDI Out sends nothing
+            if (isHeld) midi.addEvent (juce::MidiMessage::noteOn (ch, ev.pitch, (juce::uint8) ev.velocity), ev.offset);
             if (song->parts[(size_t) ev.part].sound)
             {
                 stopVoice (ev.part, ev.pitch);
@@ -312,22 +325,27 @@ Engine::Capture Engine::getCapture()
     const double rate = sampleRate / decim;
     if (ringCount < (size_t) (rate * 4.0))
         return c;
-    // where the oldest kept sample sits on the host's timeline, then skip to a bar line (a 4-bar line if there is room)
+    // where the oldest kept sample sits on the host's timeline, then skip to the next bar line
     const double firstPpq = captureStartPpq + (double) (ringTotal - ringCount) / rate * captureBpm / 60.0;
-    const double haveBeats = (double) ringCount / rate * captureBpm / 60.0;
     double skip = positiveMod (-firstPpq, captureBeatsPerBar);
     if (skip > captureBeatsPerBar - 0.02) skip = 0;
-    const double skip16 = positiveMod (-firstPpq, 4.0 * captureBeatsPerBar);
-    if (haveBeats - skip16 >= 4.0 * captureBeatsPerBar) skip = skip16;
-    const auto skipSamples = (size_t) (skip * 60.0 / captureBpm * rate);
+    const auto skipSamples = (size_t) std::llround (skip * 60.0 / captureBpm * rate);
     if (ringCount <= skipSamples + (size_t) (rate * 4.0))
         return c;
     const size_t n = ringCount - skipSamples;
     const size_t first = (ringWrite + ring.size() - ringCount + skipSamples) % ring.size();
     c.samples.resize (n);
+    double sum = 0;
     for (size_t i = 0; i < n; ++i)
+    {
         c.samples[i] = ring[(first + i) % ring.size()];
+        sum += (double) c.samples[i] * c.samples[i];
+    }
     c.sampleRate = rate;
+    c.startBeat = std::round (firstPpq + skip);
+    c.bpm = captureBpm;
+    c.beatsPerBar = captureBeatsPerBar;
+    c.level = std::sqrt (sum / (double) n);
     return c;
 }
 } // namespace m1d1

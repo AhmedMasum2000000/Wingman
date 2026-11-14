@@ -1542,6 +1542,27 @@ static void webEngineTests()
     const auto cap = engine.getCapture();
     CHECK (cap.sampleRate == 24000.0 && cap.samples.size() > (size_t) (4.0 * cap.sampleRate));
     CHECK (std::abs ((double) cap.samples.size() / cap.sampleRate - (6.0 - (4.0 - 0.7) * 0.5)) < 0.05);
+    CHECK (cap.startBeat == 4.0 && cap.bpm == 120.0 && cap.beatsPerBar == 4.0 && cap.level > 0.01);   // where it starts in the song
+
+    // a pattern loop in the host (back to a bar line from a bar line) keeps the recording going
+    head.ppq = 8.0; run (4.0, true);              // beats 8 .. 16
+    for (int loop = 0; loop < 3; ++loop) { head.ppq = 8.0; run (4.0, true); }   // the host loops bars 3-4
+    run (0.05, false);
+    const auto looped = engine.getCapture();
+    CHECK (looped.startBeat == 8.0 && std::abs ((double) looped.samples.size() / looped.sampleRate - 16.0) < 0.1);
+    // a jump that is not a loop (a seek to the middle of a bar) starts a new recording
+    head.ppq = 2.0; run (2.5, true); head.ppq = 30.5; run (5.0, true); run (0.05, false);
+    CHECK (engine.getCapture().startBeat == 32.0);
+
+    // a part switched off in MIDI Out sends nothing, the others still do
+    {
+        auto noBass = m1d1::parseSong (json.replace ("{\"ch\":2,\"sound\":true,", "{\"ch\":2,\"sound\":true,\"midi\":false,"));
+        CHECK (noBass != nullptr && ! noBass->parts[0].midi && noBass->parts[1].midi);
+        engine.setSong (noBass); for (auto& c : ons) c = 0; head.ppq = 0; run (2.0, true); run (0.05, false);
+        CHECK (ons[2] == 0 && ons[1] == 3 && ons[3] == 1);
+        stuck = 0; for (auto& [k, v] : heldNotes) stuck += v > 0 ? 1 : 0;
+        CHECK (stuck == 0);
+    }
 
     // the processor saves the interface's session and parts with the project, and plays them after loading
     {

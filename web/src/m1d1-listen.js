@@ -519,10 +519,16 @@
     const seconds = total / sr;
 
     // tempo and beats
-    const on = onsetEnvelopes(xO, srO);
-    let bpm = 0, bpmConfidence = 0, beatOffsetSec = 0, periodSec = 0.5, first = 0;
+    // A known grid (inside a DAW: the host's tempo, and the song beat the audio starts on) replaces the estimate.
+    const grid = o.grid && o.grid.bpm > 0 && Number.isFinite(o.grid.bpm) ? o.grid : null;
+    const on = grid ? null : onsetEnvelopes(xO, srO);
+    let bpm = 0, bpmConfidence = 0, beatOffsetSec = 0, periodSec = 0.5, first = 0, gridK0 = 0;
     const tempo = on ? estimateTempo(on) : null;
-    if (tempo) {
+    if (grid) {
+      bpm = Math.min(Math.max(+grid.bpm, 20), 400); periodSec = 60 / bpm; bpmConfidence = 1;
+      const at0 = Math.max(0, +grid.firstBeatSec || 0);
+      gridK0 = Math.floor(at0 / periodSec + 1e-9); first = at0 - gridK0 * periodSec;   // earlier whole beats are kept too
+    } else if (tempo) {
       const bands = [on.low, on.mid, on.high].map(b => shapeEnvelope(b, 0).env);
       let period = tempo.period, phase = beatPhase(bands, period);
       // When every other step of the grid carries next to nothing below the cymbals (no kick, no bass or chord
@@ -581,16 +587,57 @@
     for (let t = firstSound + 1; t < G; t++) { barScore[t % 4] += nov[t]; barCount[t % 4]++; }
     let novTop = 0;
     for (let p = 0; p < 4; p++) { barScore[p] = barCount[p] ? barScore[p] / barCount[p] : 0; if (barScore[p] > novTop) novTop = barScore[p]; }
+    let down, N, chroma, bass;
+    if (grid) ({ down, N, chroma, bass } = gridWindow());
+    else {
     let barPhase = firstSound % 4, barBest = -1;
     for (let p = 0; p < 4; p++) { const v = (novTop > 1e-9 ? barScore[p] / novTop : 0) + (p === firstSound % 4 ? 0.3 : 0); if (v > barBest) { barBest = v; barPhase = p; } }
-    let down = firstSound; while (down % 4 !== barPhase) down++;
+    down = firstSound; while (down % 4 !== barPhase) down++;
     if (down >= G - 1) down = firstSound;
     if (down !== firstSound) notes.push('the audio seems to start before the bar line: the progression is read from the first bar line after it');
-    beatOffsetSec = Math.max(0, beatTimes[down]);
 
     // beats from the first downbeat on, as far as they sound
     let lastSound = G - 1; while (lastSound > down && !sounding(lastSound)) lastSound--;
-    const N = lastSound - down + 1, chroma = all.chroma.slice(down, down + N), bass = all.bass.slice(down, down + N);
+    N = lastSound - down + 1; chroma = all.chroma.slice(down, down + N); bass = all.bass.slice(down, down + N);
+    }
+    if (!N) return fallback('nothing with a pitch was heard');
+    beatOffsetSec = Math.max(0, beatTimes[down]);
+
+    // The 16 beats of the song's 4-bar grid that hold what was heard: song beats 16w ... 16w+15. When the music
+    // repeats every 4 bars, every pass is averaged (steadier chords); when it does not (a longer progression),
+    // only the latest pass is read, and the notes say which bars.
+    function gridWindow() {
+      const songBeat = k => Math.round(+grid.startBeat || 0) - gridK0 + k, bpb = Math.max(1, Math.round(+grid.beatsPerBar || 4));
+      const windows = new Map();
+      for (let k = 0; k < G; k++) {
+        const b = songBeat(k), w = Math.floor(b / 16), p = mod(b, 16);
+        if (!windows.has(w)) windows.set(w, new Array(16).fill(-1));
+        windows.get(w)[p] = k;
+      }
+      const soundingIn = ks => ks.filter(k => k >= 0 && sounding(k)).length;
+      let full = [...windows.entries()].filter(([, ks]) => ks.every(k => k >= 0) && soundingIn(ks) >= 8).sort((a, b) => a[0] - b[0]);
+      if (!full.length) {   // less than one whole pass: what there is, at its place in the grid
+        const best = [...windows.entries()].sort((a, b) => soundingIn(b[1]) - soundingIn(a[1]))[0];
+        if (!best || !soundingIn(best[1])) return { N: 0 };
+        full = [best];
+        notes.push('less than 4 bars were heard on the grid: play the track a little longer and listen again for every chord');
+      }
+      const latest = full[full.length - 1][1];
+      const like = (ks, ref) => { let s = 0, n = 0; for (let p = 0; p < 16; p++) if (ks[p] >= 0 && ref[p] >= 0 && sounding(ks[p]) && sounding(ref[p])) { s += cosineOf(all.chroma[ks[p]], all.chroma[ref[p]]); n++; } return n ? s / n : 1; };
+      const used = full.filter(([, ks]) => like(ks, latest) >= 0.8);
+      if (used.length < full.length) {
+        const w = full[full.length - 1][0];
+        notes.push(`the progression seems longer than 4 bars: these are bars ${Math.floor(16 * w / bpb) + 1}-${Math.floor(16 * (w + 1) / bpb)} of your song`);
+      } else if (used.length > 1) notes.push(`${used.length} passes of the 4 bars were heard and averaged`);
+      const ch = [], ba = [];
+      for (let p = 0; p < 16; p++) {
+        const c = new Float64Array(12), b = new Float64Array(12); let n = 0;
+        for (const [, ks] of used) { const k = ks[p]; if (k < 0 || !sounding(k)) continue; for (let i = 0; i < 12; i++) { c[i] += all.chroma[k][i]; b[i] += all.bass[k][i]; } n++; }
+        if (n) for (let i = 0; i < 12; i++) { c[i] /= n; b[i] /= n; }
+        ch.push(c); ba.push(b);
+      }
+      return { down: latest[0] >= 0 ? latest[0] : 0, N: 16, chroma: ch, bass: ba };
+    }
 
     // what is heard before a key is known
     const free = freeCandidates(), freeTrack = track(free, chroma, bass, 0.75);
@@ -658,7 +705,7 @@
     }
     let cc = 0; spec.forEach((el, i) => { cc += confidence[i] * el.len; });
     const chordConfidence = Math.round(clamp01(cc / 16) * (0.5 + 0.5 * keyConfidence) * 1000) / 1000;
-    if (bpmConfidence < 0.35 && tempo) notes.push('the beat is not steady or not clear: tempo and chord timing may be off');
+    if (bpmConfidence < 0.35 && tempo && !grid) notes.push('the beat is not steady or not clear: tempo and chord timing may be off');
     return { bpm, bpmConfidence: Math.round(bpmConfidence * 1000) / 1000, beatOffsetSec: Math.round(beatOffsetSec * 10000) / 10000,
       key, keyConfidence: Math.round(keyConfidence * 1000) / 1000, spec, confidence, chordConfidence, bassPcs, notes,
       tuningCents: Math.round(all.tuningCents * 10) / 10 };

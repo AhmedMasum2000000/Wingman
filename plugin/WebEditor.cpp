@@ -138,6 +138,16 @@ Options WebEditor::makeOptions()
                 (*finished) ({});
         })
 
+        // how much of the track has been heard (for listening on its own once there is enough)
+        .withNativeFunction ("getCaptureInfo", [this] (const juce::Array<juce::var>&, Completion done)
+        {
+            auto& e = processor.getWebEngine();
+            auto* o = new juce::DynamicObject();
+            o->setProperty ("fromBeat", e.capturedFromBeat.load());
+            o->setProperty ("beats", e.capturedBeats.load());
+            done (juce::var (o));
+        })
+
         // Listen to track: the audio the host played through this track
         .withNativeFunction ("getTrackAudio", [this] (const juce::Array<juce::var>&, Completion done)
         {
@@ -146,6 +156,10 @@ Options WebEditor::makeOptions()
             auto* o = new juce::DynamicObject();
             o->setProperty ("sr", c.sampleRate);
             o->setProperty ("secs", (double) c.samples.size() / c.sampleRate);
+            o->setProperty ("startBeat", c.startBeat);
+            o->setProperty ("bpm", c.bpm);
+            o->setProperty ("beatsPerBar", c.beatsPerBar);
+            o->setProperty ("level", c.level);
             o->setProperty ("b64", juce::Base64::toBase64 (c.samples.data(), c.samples.size() * sizeof (float)));
             done (juce::var (o));
         });

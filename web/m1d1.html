@@ -49,6 +49,9 @@ body {
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html.host body { padding: 0; overflow: hidden; }
+.hostonly { display: none; } html.host .hostonly { display: grid; gap: 6px; } html.host li.hostonly { display: list-item; }
+html.host .noplug, html.host #midiSolo, html.host label.chk:has(#midiSolo), html.host .mrow:has(#midiSel) { display: none; }
+.midiparts b { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim, #8a8a8a); }
 html.host .window { width: min(100vw, calc(100vh * 4 / 3)); }
 html.host .window::before { display: none; }
 button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent; }
@@ -577,10 +580,15 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
         <div class="mrow"><label for="midiSel">Send to</label><select id="midiSel"><option value="">Off</option></select><button class="hw sm" id="midiTest" disabled>Test note</button></div>
         <p class="note" id="midiNote"></p>
         <label class="chk"><input type="checkbox" id="midiSolo" checked> Mute M1D1's own sound while MIDI out is on</label>
+        <div class="hostonly midiparts"><b>Send these parts</b>
+          <label class="chk"><input type="checkbox" id="mo1" checked> Chords &middot; channel 1</label>
+          <label class="chk"><input type="checkbox" id="mo0" checked> Bass &middot; channel 2</label>
+          <label class="chk"><input type="checkbox" id="mo2" checked> Lead &middot; channel 3</label></div>
         <div class="steps"><b>In FL Studio (the plugin)</b>
           <ol><li>Open M1D1's wrapper settings (the gear) and set <i>MIDI &rarr; Output port</i> to a number, for example <i>7</i>.</li>
           <li>On each instrument you want to play, set <i>MIDI &rarr; Input port</i> to the same number.</li>
-          <li>Give each instrument the channel of its part (1, 2 or 3), press Play on a part in M1D1, and the instrument plays it.</li></ol></div>
+          <li class="noplug">Give each instrument the channel of its part (1, 2 or 3), press Play on a part in M1D1, and the instrument plays it.</li>
+          <li class="hostonly">An instrument on that port plays every part ticked above. To play one part on it, untick the others. Then press Play in FL Studio.</li></ol></div>
         <div class="row"><button class="hw" id="portOk">Done</button></div>
       </div>
     </div>
@@ -3245,10 +3253,16 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     const seconds = total / sr;
 
     // tempo and beats
-    const on = onsetEnvelopes(xO, srO);
-    let bpm = 0, bpmConfidence = 0, beatOffsetSec = 0, periodSec = 0.5, first = 0;
+    // A known grid (inside a DAW: the host's tempo, and the song beat the audio starts on) replaces the estimate.
+    const grid = o.grid && o.grid.bpm > 0 && Number.isFinite(o.grid.bpm) ? o.grid : null;
+    const on = grid ? null : onsetEnvelopes(xO, srO);
+    let bpm = 0, bpmConfidence = 0, beatOffsetSec = 0, periodSec = 0.5, first = 0, gridK0 = 0;
     const tempo = on ? estimateTempo(on) : null;
-    if (tempo) {
+    if (grid) {
+      bpm = Math.min(Math.max(+grid.bpm, 20), 400); periodSec = 60 / bpm; bpmConfidence = 1;
+      const at0 = Math.max(0, +grid.firstBeatSec || 0);
+      gridK0 = Math.floor(at0 / periodSec + 1e-9); first = at0 - gridK0 * periodSec;   // earlier whole beats are kept too
+    } else if (tempo) {
       const bands = [on.low, on.mid, on.high].map(b => shapeEnvelope(b, 0).env);
       let period = tempo.period, phase = beatPhase(bands, period);
       // When every other step of the grid carries next to nothing below the cymbals (no kick, no bass or chord
@@ -3307,16 +3321,57 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     for (let t = firstSound + 1; t < G; t++) { barScore[t % 4] += nov[t]; barCount[t % 4]++; }
     let novTop = 0;
     for (let p = 0; p < 4; p++) { barScore[p] = barCount[p] ? barScore[p] / barCount[p] : 0; if (barScore[p] > novTop) novTop = barScore[p]; }
+    let down, N, chroma, bass;
+    if (grid) ({ down, N, chroma, bass } = gridWindow());
+    else {
     let barPhase = firstSound % 4, barBest = -1;
     for (let p = 0; p < 4; p++) { const v = (novTop > 1e-9 ? barScore[p] / novTop : 0) + (p === firstSound % 4 ? 0.3 : 0); if (v > barBest) { barBest = v; barPhase = p; } }
-    let down = firstSound; while (down % 4 !== barPhase) down++;
+    down = firstSound; while (down % 4 !== barPhase) down++;
     if (down >= G - 1) down = firstSound;
     if (down !== firstSound) notes.push('the audio seems to start before the bar line: the progression is read from the first bar line after it');
-    beatOffsetSec = Math.max(0, beatTimes[down]);
 
     // beats from the first downbeat on, as far as they sound
     let lastSound = G - 1; while (lastSound > down && !sounding(lastSound)) lastSound--;
-    const N = lastSound - down + 1, chroma = all.chroma.slice(down, down + N), bass = all.bass.slice(down, down + N);
+    N = lastSound - down + 1; chroma = all.chroma.slice(down, down + N); bass = all.bass.slice(down, down + N);
+    }
+    if (!N) return fallback('nothing with a pitch was heard');
+    beatOffsetSec = Math.max(0, beatTimes[down]);
+
+    // The 16 beats of the song's 4-bar grid that hold what was heard: song beats 16w ... 16w+15. When the music
+    // repeats every 4 bars, every pass is averaged (steadier chords); when it does not (a longer progression),
+    // only the latest pass is read, and the notes say which bars.
+    function gridWindow() {
+      const songBeat = k => Math.round(+grid.startBeat || 0) - gridK0 + k, bpb = Math.max(1, Math.round(+grid.beatsPerBar || 4));
+      const windows = new Map();
+      for (let k = 0; k < G; k++) {
+        const b = songBeat(k), w = Math.floor(b / 16), p = mod(b, 16);
+        if (!windows.has(w)) windows.set(w, new Array(16).fill(-1));
+        windows.get(w)[p] = k;
+      }
+      const soundingIn = ks => ks.filter(k => k >= 0 && sounding(k)).length;
+      let full = [...windows.entries()].filter(([, ks]) => ks.every(k => k >= 0) && soundingIn(ks) >= 8).sort((a, b) => a[0] - b[0]);
+      if (!full.length) {   // less than one whole pass: what there is, at its place in the grid
+        const best = [...windows.entries()].sort((a, b) => soundingIn(b[1]) - soundingIn(a[1]))[0];
+        if (!best || !soundingIn(best[1])) return { N: 0 };
+        full = [best];
+        notes.push('less than 4 bars were heard on the grid: play the track a little longer and listen again for every chord');
+      }
+      const latest = full[full.length - 1][1];
+      const like = (ks, ref) => { let s = 0, n = 0; for (let p = 0; p < 16; p++) if (ks[p] >= 0 && ref[p] >= 0 && sounding(ks[p]) && sounding(ref[p])) { s += cosineOf(all.chroma[ks[p]], all.chroma[ref[p]]); n++; } return n ? s / n : 1; };
+      const used = full.filter(([, ks]) => like(ks, latest) >= 0.8);
+      if (used.length < full.length) {
+        const w = full[full.length - 1][0];
+        notes.push(`the progression seems longer than 4 bars: these are bars ${Math.floor(16 * w / bpb) + 1}-${Math.floor(16 * (w + 1) / bpb)} of your song`);
+      } else if (used.length > 1) notes.push(`${used.length} passes of the 4 bars were heard and averaged`);
+      const ch = [], ba = [];
+      for (let p = 0; p < 16; p++) {
+        const c = new Float64Array(12), b = new Float64Array(12); let n = 0;
+        for (const [, ks] of used) { const k = ks[p]; if (k < 0 || !sounding(k)) continue; for (let i = 0; i < 12; i++) { c[i] += all.chroma[k][i]; b[i] += all.bass[k][i]; } n++; }
+        if (n) for (let i = 0; i < 12; i++) { c[i] /= n; b[i] /= n; }
+        ch.push(c); ba.push(b);
+      }
+      return { down: latest[0] >= 0 ? latest[0] : 0, N: 16, chroma: ch, bass: ba };
+    }
 
     // what is heard before a key is known
     const free = freeCandidates(), freeTrack = track(free, chroma, bass, 0.75);
@@ -3384,7 +3439,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     }
     let cc = 0; spec.forEach((el, i) => { cc += confidence[i] * el.len; });
     const chordConfidence = Math.round(clamp01(cc / 16) * (0.5 + 0.5 * keyConfidence) * 1000) / 1000;
-    if (bpmConfidence < 0.35 && tempo) notes.push('the beat is not steady or not clear: tempo and chord timing may be off');
+    if (bpmConfidence < 0.35 && tempo && !grid) notes.push('the beat is not steady or not clear: tempo and chord timing may be off');
     return { bpm, bpmConfidence: Math.round(bpmConfidence * 1000) / 1000, beatOffsetSec: Math.round(beatOffsetSec * 10000) / 10000,
       key, keyConfidence: Math.round(keyConfidence * 1000) / 1000, spec, confidence, chordConfidence, bassPcs, notes,
       tuningCents: Math.round(all.tuningCents * 10) / 10 };
@@ -3542,7 +3597,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
 
   // Inside the M1D1 plugin the page talks to the plugin through JUCE's bridge (window.__JUCE__).
   const HOST = !!(window.__JUCE__ && window.__JUCE__.backend);
-  let hostRun = false, hostCall = null, hostB64 = null;   // hostRun: the DAW is playing
+  let hostRun = false, hostCall = null, hostB64 = null, hostModeChanged = null;   // hostRun: the DAW is playing
   // ---------- audio: one clock. The take and each MIDI part are layers that sound alone or together, always in sync ----------
   let ctx = null, master = null, aL = null, aR = null, source = null, playing = false, offset = 0;
   const partOn = [false, false, false];
@@ -4232,7 +4287,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     [1, 2, 3, 4].forEach(n => setStage(n, ready)); overview = null; offset = 0; reveal = 0; wReveal = 0; revealing = true;
     renderChords(true); syncStates(); ui(); react(m === 'generate' ? 'wink' : 'curious', 1.3, 'nod');
   }
-  $$('.modesw button').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+  $$('.modesw button').forEach(b => b.addEventListener('click', () => { setMode(b.dataset.mode); if (HOST && typeof hostModeChanged === 'function') hostModeChanged(); }));
   function clearAll() {
     runId++; stopAll(); offset = 0; exampleOn = false; hasAudio = mode === 'generate'; isExample = mode === 'generate'; buffer = null; heard = null; detected.root = 9; detected.scale = 0; overview = null; stage1 = stage2 = stage3 = stage4 = false; scanning = false;
     [1, 2, 3, 4].forEach(n => setStage(n, false));
@@ -4243,10 +4298,10 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     syncStates(); ui();
   }
   // listen to the file: up to a minute of it, mixed to mono
-  function listenTo(buf) {
+  function listenTo(buf, extra) {
     const n = Math.min(buf.length, Math.floor(buf.sampleRate * 60)), mono = new Float32Array(n), chs = buf.numberOfChannels;
     for (let c = 0; c < chs; c++) { const d = buf.getChannelData(c); for (let i = 0; i < n; i++) mono[i] += d[i] / chs; }
-    let res = null; try { res = M1D1Listen.analyse(mono, buf.sampleRate, { gen: M1D1Gen }); } catch (e) { res = null; }
+    let res = null; try { res = M1D1Listen.analyse(mono, buf.sampleRate, { gen: M1D1Gen, ...(extra || {}) }); } catch (e) { res = null; }
     const chip = $('#exampleChip'); chip.hidden = false;
     if (!res || !res.spec || !res.spec.length) { heard = null; chip.textContent = 'Could not analyse this audio'; chip.title = 'The chords shown are an example, not read from this file.'; return; }
     heard = { bpm: res.bpm, start: Math.max(0, Math.min(buf.duration - .5, res.beatOffsetSec || 0)), res };
@@ -4833,11 +4888,26 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     const call = (name, ...params) => new Promise(res => { const id = callId++; waiting.set(id, res); be.emitEvent('__juce__invoke', { name, params, resultId: id }); });
     const b64 = bytes => { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); };
     hostCall = call; hostB64 = b64;
+    // which parts go out as MIDI (all, unless unticked in the MIDI Out dialog)
+    const midiParts = [true, true, true];
+    [0, 1, 2].forEach(i => { const cb = $('#mo' + i); if (cb) cb.addEventListener('change', () => { midiParts[i] = cb.checked; }); });
+    const setMidiParts = a => { if (!Array.isArray(a)) return; [0, 1, 2].forEach(i => { midiParts[i] = a[i] !== false; const cb = $('#mo' + i); if (cb) cb.checked = midiParts[i]; }); };
+
+    // Inside the DAW M1D1 starts empty: no example chords and no MIDI until it has heard the track (or you open a
+    // file, load the example or switch to Generate). The first time the DAW plays, it listens to the track on its own.
+    let waitingForTrack = false;
+    const hintText = $('#hint span');
+    const startEmpty = () => {
+      if (mode !== 'extract') return;
+      clearAll(); waitingForTrack = true;
+      if (hintText) hintText.textContent = 'Play your project: M1D1 listens to this track · or drop audio here';
+      $('#fileName').textContent = 'Waiting for your track';
+    };
 
     // the notes the plugin plays, re-sent whenever they change
     let sentSong = '';
     const syncSong = () => {
-      const song = { loopBeats: progLen(), tempo, parts: stage4 ? [0, 1, 2].map(i => ({ ch: parts[i].ch, sound: !!partOn[i],
+      const song = { loopBeats: progLen(), tempo, parts: stage4 ? [0, 1, 2].map(i => ({ ch: parts[i].ch, sound: !!partOn[i], midi: midiParts[i],
         notes: notesFor(i).map(n => [+n.x.toFixed(4), +n.len.toFixed(4), n.m, Math.max(1, Math.min(127, Math.round(n.v || 100)))]) })) : [] };
       const s = JSON.stringify(song); if (s !== sentSong) { sentSong = s; call('setSong', s); }
     };
@@ -4874,25 +4944,46 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     tb.title = 'Read the key, tempo and chords from the audio on this track. Play your project for a few bars first.';
     tb.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 8h2l1.5-4 2 8 2-10 2 9 1.5-3h2"/></svg>Listen to track';
     $('#btnOpen').after(tb);
-    tb.addEventListener('click', async () => {
+    // read the chords from the track, on the host's own grid: its tempo, and the song beat the audio starts on,
+    // so the parts M1D1 plays line up with the song's bars
+    async function listenToTrack(quiet) {
       const r = await call('getTrackAudio');
-      if (!r || !r.b64) { $('#fileName').textContent = 'Play your project for a few bars, then press Listen to track'; react('thinking', 2); return; }
+      if (!r || !r.b64) { if (!quiet) { $('#fileName').textContent = 'Play your project for a few bars, then press Listen to track'; react('thinking', 2); } return false; }
+      if (!(r.level > 1e-4)) { $('#fileName').textContent = 'M1D1 hears nothing on this track: put it on the mixer insert your audio plays through'; react('pout', 2); return false; }
       const bin = atob(r.b64), u8 = new Uint8Array(bin.length); for (let k = 0; k < bin.length; k++) u8[k] = bin.charCodeAt(k);
       const f32 = new Float32Array(u8.buffer); audio();
       const buf = ctx.createBuffer(1, f32.length, r.sr); buf.copyToChannel(f32, 0);
       pause(); buffer = buf; if (mode === 'generate') setMode('extract'); hasAudio = true; isExample = false; offset = 0; overview = null; $('#hint').hidden = true;
-      fileName = 'Track audio'; $('#fileName').textContent = `Track audio · ${r.secs.toFixed(0)} s`;
-      listenTo(buffer); ui(); run();
-    });
+      fileName = 'Your track'; waitingForTrack = false;
+      listenTo(buffer, { grid: { bpm: r.bpm, firstBeatSec: 0, startBeat: r.startBeat, beatsPerBar: r.beatsPerBar } });
+      $('#fileName').textContent = `Your track · ${Math.round(r.secs * r.bpm / 60 / r.beatsPerBar)} bars heard`;
+      ui(); run(); return true;
+    }
+    tb.addEventListener('click', () => listenToTrack(false));
+    hostModeChanged = () => { if (mode === 'generate') waitingForTrack = false; else if (!buffer && !exampleOn) startEmpty(); };
+    // listening on its own: once the DAW has played one whole 4-bar stretch of the song's grid
+    setInterval(async () => {
+      if (!waitingForTrack || !hostRun || mode !== 'extract') return;
+      const info = await call('getCaptureInfo'); if (!info) return;
+      const from = info.fromBeat, end = from + info.beats, win = Math.ceil(from / 16 - 1e-6) * 16, have = Math.max(0, end - win);
+      if (have >= 16.5) { waitingForTrack = false; if (!(await listenToTrack(true))) waitingForTrack = true; }
+      else $('#fileName').textContent = `Listening to your track · ${Math.min(4, Math.floor(have / 4) + 1)} of 4 bars`;
+    }, 700);
+    // anything else that brings chords ends the wait; Reset in Extract starts it again
+    $('#btnExample').addEventListener('click', () => { waitingForTrack = false; });
+    $('#btnOpen').addEventListener('click', () => { waitingForTrack = false; });
+    $('#resetYes').addEventListener('click', () => setTimeout(startEmpty, 0));
 
     // the session is saved in the FL project and restored when it opens
     const stateNow = () => { const k = {}; knobs.forEach(q => { if (!q.steps) k[q.label] = q.v; });
-      return { v: 1, mode, keyRoot, scaleIdx, tempo, spec: cloneSpec(spec), setIdx, PT: snap().PT, knobs: k, name: $('#fileName').textContent, ready: stage4 }; };
+      return { v: 1, mode, keyRoot, scaleIdx, tempo, spec: cloneSpec(spec), setIdx, PT: snap().PT, knobs: k, name: $('#fileName').textContent, ready: stage4 && !waitingForTrack, midi: midiParts.slice() }; };
     let savedState = '';
     call('getState').then(s => {
+      let restored = false;
       try {
         const st = s ? JSON.parse(s) : null;
         if (st && st.v === 1 && Array.isArray(st.spec) && st.spec.length) {
+          restored = !!st.ready || st.mode === 'generate'; setMidiParts(st.midi);
           if (st.mode && st.mode !== mode) setMode(st.mode);
           Object.entries(st.knobs || {}).forEach(([l, v]) => { const q = knobs.find(q => q.label === l && !q.steps); if (q) q.set(v, true); });
           keyRoot = st.keyRoot; scaleIdx = st.scaleIdx; spec = st.spec; setIdx = st.setIdx ?? -1; PT = st.PT; history = [];
@@ -4901,6 +4992,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
           renderChords(true); applyDetail(true); changed([0, 1, 2]); syncStates(); ui();
         }
       } catch (e) {}
+      if (!restored) startEmpty();
       savedState = JSON.stringify(stateNow());
       setInterval(() => { const s2 = JSON.stringify(stateNow()); if (s2 !== savedState) { savedState = s2; call('saveState', s2); } }, 1000);
     });

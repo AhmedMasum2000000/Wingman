@@ -20,8 +20,11 @@ INSTALL
 
 USE IT IN FL STUDIO
   - Put M1D1 on the mixer insert of the audio you want to build around.
-  - Extract: play your project for a few bars, then press LISTEN TO TRACK. Or press OPEN AUDIO
-    (or drop a WAV/MP3 on M1D1). It finds the key, tempo and chords and writes bass, chords and lead.
+  - Extract: press Play in FL Studio. M1D1 listens to the track and, after 4 bars, shows its key and
+    chords on FL Studio's own tempo and bars, and writes bass, chords and lead that line up with the song.
+    Press LISTEN TO TRACK to read it again (for example from another part of the song).
+    Or press OPEN AUDIO (or drop a WAV/MP3 on M1D1) to read a file instead.
+    Until it has heard something, M1D1 sends no MIDI.
   - Generate: pick a key, scale and tempo and M1D1 writes the parts for you.
   - KEEP a part you like and press NEW or GENERATE: the other parts are rewritten around it.
   - PLAY on a part (or the big Play button) previews it through FL Studio's mixer.
@@ -35,8 +38,9 @@ USE IT IN FL STUDIO
   1. Open M1D1's plugin window, click the cog at the top left (Plugin options), and in the MIDI
      section set "Output port" to a free number, for example 1.
   2. Load your synth (FLEX, Serum, a piano...). In its Plugin options, set "Input port" to the same number.
-  3. Chords come out on MIDI channel 1, bass on channel 2 and the lead melody on channel 3. To play them on different sounds, load two
-     synths on the same port and set each one to listen to one channel, or use Patcher.
+  3. Chords come out on MIDI channel 1, bass on channel 2 and the lead melody on channel 3.
+     A synth on that port plays every part M1D1 sends: in M1D1, press MIDI OUT and tick only the
+     parts you want (for example only Chords for a piano).
   4. Press Play in FL Studio. The synth plays M1D1's parts in time with your project.
 
 UNINSTALL

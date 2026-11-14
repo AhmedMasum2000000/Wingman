@@ -14,7 +14,7 @@
 namespace m1d1
 {
 struct Note { double start = 0, length = 0; int pitch = 60, velocity = 100; };
-struct Part { int channel = 1; bool sound = false; std::vector<Note> notes; };
+struct Part { int channel = 1; bool sound = false, midi = true; std::vector<Note> notes; };   // midi: sent as MIDI out
 struct Song
 {
     double loopBeats = 16.0, tempo = 120.0;
@@ -43,9 +43,13 @@ public:
     std::atomic<double> reportBeat { 0.0 }, reportBpm { 120.0 };
     std::atomic<bool> reportHostPlaying { false }, reportPreview { false };
 
-    // the track's recent audio as mono at captureRate(), trimmed to start on a bar line; empty if too little was heard
-    struct Capture { std::vector<float> samples; double sampleRate = 0; };
+    // The track's recent audio as mono (about 22 kHz), starting on a bar line, with where that is in the song:
+    // startBeat is the song beat (host ppq) of the first sample, so the interface can read the chords on the
+    // host's own grid. Empty if less than 4 seconds were heard. level is the RMS, to tell silence apart.
+    struct Capture { std::vector<float> samples; double sampleRate = 0, startBeat = 0, bpm = 120, beatsPerBar = 4, level = 0; };
     Capture getCapture();
+    // how much has been heard so far, without copying it: song beat of the first sample and the number of beats
+    std::atomic<double> capturedFromBeat { 0.0 }, capturedBeats { 0.0 };
     static constexpr double captureSeconds = 32.0;
 
 private:
