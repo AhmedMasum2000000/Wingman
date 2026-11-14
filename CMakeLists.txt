@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Backline VERSION 0.1.0 LANGUAGES C CXX)
+project(Backline VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,11 +38,11 @@ if(BACKLINE_BUILD_PLUGIN)
     endif()
 
     juce_add_plugin(Backline
-        COMPANY_NAME "Backline"
+        COMPANY_NAME "ACND"
         PLUGIN_MANUFACTURER_CODE Bkln
         PLUGIN_CODE Bkl1
         FORMATS ${BACKLINE_FORMATS}
-        PRODUCT_NAME "Backline"
+        PRODUCT_NAME "M1D1"
         IS_SYNTH FALSE
         NEEDS_MIDI_INPUT FALSE
         NEEDS_MIDI_OUTPUT TRUE

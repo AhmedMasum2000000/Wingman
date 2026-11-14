@@ -36,15 +36,15 @@ juce::File midiExportFolder (const void* instance)
 {
     // One folder per plugin instance, so two instances never overwrite each other's file mid-drag.
     auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory)
-                      .getChildFile ("Backline").getChildFile (juce::String::toHexString ((juce::pointer_sized_int) instance));
+                      .getChildFile ("M1D1").getChildFile (juce::String::toHexString ((juce::pointer_sized_int) instance));
     folder.createDirectory();
     return folder;
 }
 
 juce::String partName (BacklineProcessor::Part part)
 {
-    return part == BacklineProcessor::Part::Chords ? "Backline Chords"
-         : part == BacklineProcessor::Part::Bass   ? "Backline Bass" : "Backline Audio to MIDI";
+    return part == BacklineProcessor::Part::Chords ? "M1D1 Chords"
+         : part == BacklineProcessor::Part::Bass   ? "M1D1 Bass" : "M1D1 Audio to MIDI";
 }
 
 // Where exported audio goes by default: a folder the user keeps, because DAWs refer to dropped audio there.
@@ -53,7 +53,7 @@ juce::File defaultExportFolder()
     auto base = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
     if (! base.isDirectory())
         base = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
-    return base.getChildFile ("Backline").getChildFile ("Exports");
+    return base.getChildFile ("M1D1").getChildFile ("Exports");
 }
 
 // FNV-1a over the samples, to recognise audio that was exported before.
@@ -1429,7 +1429,7 @@ juce::File BacklineProcessor::writeWavFile (Part part)
 
     // A new file every time: a DAW may still refer to the earlier ones.
     if (! folder.createDirectory())
-        folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("Backline").getChildFile ("Exports");
+        folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("M1D1").getChildFile ("Exports");
     folder.createDirectory();
     const auto file = folder.getChildFile (partName (part) + " " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S") + ".wav")
                           .getNonexistentSibling();

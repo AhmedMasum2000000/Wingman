@@ -1,10 +1,10 @@
-# Backline
+# M1D1
 
 An original audio plugin (VST3 / AU / standalone) that listens to audio in your DAW and
 suggests chords and a bassline that fit it. Written from scratch with JUCE; it contains no
 code, models or content from any commercial product.
 
-![Backline interface](docs/screenshot.png)
+![M1D1 interface](docs/screenshot.png)
 
 ## What it does today
 
@@ -27,15 +27,17 @@ In Command Prompt:
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/AhmedMasum2000000/Wingman/releases/latest/download/install.ps1 | iex"
 ```
 
-Or download [Backline-Windows.zip](https://github.com/AhmedMasum2000000/Wingman/releases/latest/download/Backline-Windows.zip),
-unzip it and double-click `Install.bat`. Then rescan plugins in your DAW. The files are not
-code-signed, so Windows may show an "unknown publisher" warning.
+Or download [M1D1-Windows.zip](https://github.com/AhmedMasum2000000/Wingman/releases/latest/download/M1D1-Windows.zip),
+unzip it and double-click `Install.bat`. It installs the VST3 plugin, the standalone app (with Start menu
+and desktop shortcuts) and an uninstaller, and removes an older Backline install. Then in FL Studio run
+Options > Manage plugins > Find plugins. To remove M1D1, use Settings > Apps > M1D1 or `Uninstall.bat`.
+The files are not code-signed, so Windows may show an "unknown publisher" warning.
 
 ## Using it
 
-1. Put Backline on the audio track you want to build around.
+1. Put M1D1 on the audio track you want to build around.
 2. Start playback, press the record button, let a few bars play, then press it again
-   (or stop the DAW). If you start mid-bar, Backline waits for the next bar line.
+   (or stop the DAW). If you start mid-bar, M1D1 waits for the next bar line.
 3. Try the ideas 1-4, click chords to change them, pick rhythms.
 4. Drag the MIDI tiles onto instrument tracks.
 
@@ -50,8 +52,8 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 The plugin ends up in `build/Backline_artefacts/Release/`. Every push builds the Windows
-version in GitHub Actions, validates it with pluginval and uploads a `Backline-Windows`
-package containing `Backline.vst3`, the standalone `Backline.exe` and `Install.bat`.
+version in GitHub Actions, validates it with pluginval and uploads an `M1D1-Windows`
+package containing `M1D1.vst3`, the standalone `M1D1.exe`, `Install.bat` and `Uninstall.bat`.
 
 On Linux install first: `libasound2-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev
 libxext-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev`.
@@ -65,7 +67,7 @@ libxext-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev`.
 
 ## Licence
 
-Backline is free and open source under the GNU Affero General Public License v3 (see `LICENSE`).
+M1D1 (formerly Backline) is free and open source under the GNU Affero General Public License v3 (see `LICENSE`).
 You can use, copy and change it for free; if you distribute a modified version, share its source
 under the same licence. JUCE is used under its AGPLv3 option. The bundled fonts are under the
 SIL Open Font License (see `assets/README.md`).

@@ -889,7 +889,7 @@ static void versionTwoTests()
         loadLegacySession (rig.processor, "0M 7M 9m 5M");
         rig.processor.setBassRhythm (backline::BassRhythm::Sustain);
         const auto file = rig.processor.writeWavFile (Part::Bass);
-        CHECK (file.getParentDirectory() == folder.getChildFile ("Exports") && file.getFileName().startsWith ("Backline Bass "));
+        CHECK (file.getParentDirectory() == folder.getChildFile ("Exports") && file.getFileName().startsWith ("M1D1 Bass "));
         juce::AudioFormatManager formats;
         formats.registerBasicFormats();
         std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
@@ -930,7 +930,7 @@ static void versionTwoTests()
         const auto third = rig.processor.writeWavFile (Part::Bass); // the first audio again, but that file may be in use
         CHECK (third.existsAsFile() && third != file && third != second && third.getSize() == firstSize);
         const auto chordsFile = rig.processor.writeWavFile (Part::Chords);
-        CHECK (chordsFile.getFileName().startsWith ("Backline Chords ") && chordsFile != third);
+        CHECK (chordsFile.getFileName().startsWith ("M1D1 Chords ") && chordsFile != third);
         for (const auto& f : { file, second, third, chordsFile })
             f.deleteFile();
     }

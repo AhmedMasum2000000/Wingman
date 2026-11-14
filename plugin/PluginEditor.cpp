@@ -1288,7 +1288,7 @@ void BacklineEditor::paint (juce::Graphics& g)
         g.fillRoundedRectangle (tile.getX() + 8.0f, tile.getY() + 8.5f + (float) i * 6.5f, widths[i], 4.0f, 2.0f);
     g.setColour (text);
     g.setFont (display (23.0f));
-    g.drawText ("Backline", 68, 20, 150, 34, juce::Justification::centredLeft);
+    g.drawText ("M1D1", 68, 20, 150, 34, juce::Justification::centredLeft);
 
     g.setColour (textDim);
     g.setFont (body (13.0f));
@@ -1460,7 +1460,7 @@ void BacklineEditor::refresh()
     else if (processor.hasProgression())
         waveform.message = "Progression restored. Record or open a file for new ideas.";
     else
-        waveform.message = host ? "Put Backline on the track you want to build around."
+        waveform.message = host ? "Put M1D1 on the track you want to build around."
                                 : "Record from your input, or open an audio file.";
 
     if (loading)

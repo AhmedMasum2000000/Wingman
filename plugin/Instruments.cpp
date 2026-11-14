@@ -194,7 +194,7 @@ InstrumentPtr builtIn()
 juce::File defaultSoundsFolder()
 {
     return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-               .getChildFile ("Backline").getChildFile ("Sounds");
+               .getChildFile ("M1D1").getChildFile ("Sounds");
 }
 
 int noteFromFileName (const juce::String& name)

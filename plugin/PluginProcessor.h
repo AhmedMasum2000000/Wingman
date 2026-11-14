@@ -27,7 +27,7 @@ public:
     using juce::AudioProcessor::processBlockBypassed;
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
-    const juce::String getName() const override { return "Backline"; }
+    const juce::String getName() const override { return "M1D1"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return true; }
 

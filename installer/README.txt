@@ -1,14 +1,47 @@
-Backline for Windows (64-bit)
+M1D1 for Windows (64-bit) - a plugin by ACND
+MIDI extractor and generator: audio in -> key, BPM, Camelot and chords -> MIDI for bass and chords.
 
-Backline.exe      Runs on its own, no DAW needed. Double-click to try it.
-Backline.vst3     The plugin for your DAW.
-Install.bat       Double-click to install the plugin (asks for administrator rights).
+WHAT IS IN THIS FOLDER
+  Install.bat      Double-click to install everything (asks for administrator rights).
+  Uninstall.bat    Double-click to remove everything again.
+  M1D1.vst3        The plugin for FL Studio (and any other VST3 host).
+  M1D1.exe         The standalone app. Runs on its own, no DAW needed.
+  version.txt      The version of this download.
 
-Installing by hand from a Command Prompt opened as administrator, in this folder:
+INSTALL
+  1. Close FL Studio.
+  2. Unzip the download, open the M1D1 folder and double-click Install.bat. Click Yes when Windows asks.
+     It installs:
+       - the plugin to  C:\Program Files\Common Files\VST3\M1D1.vst3
+       - the app to     C:\Program Files\M1D1\M1D1.exe, with Start menu and desktop shortcuts
+       - the uninstaller, also listed in Settings > Apps > Installed apps
+     An older "Backline" install (this plugin's earlier name) is removed so FL Studio does not show two copies.
+  3. Open FL Studio: Options > Manage plugins > Find plugins. M1D1 appears in the list.
 
-    xcopy /E /I /Y Backline.vst3 "%CommonProgramFiles%\VST3\Backline.vst3"
+USE IT IN FL STUDIO
+  - Put M1D1 on the mixer insert of the audio you want to build around (or on a sampler channel),
+    or drop an audio file onto it. It finds the key, tempo and chords and writes MIDI parts.
+  - Drag a part (Bass or Chords) straight from M1D1 into the Playlist or the Piano roll.
 
-Then rescan plugins in your DAW and put Backline on the audio track you want to build around.
+  Play M1D1's MIDI on any synth (MIDI out):
+  1. Open M1D1's plugin window, click the cog at the top left (Plugin options), and in the MIDI
+     section set "Output port" to a free number, for example 1.
+  2. Load your synth (FLEX, Serum, a piano...). In its Plugin options, set "Input port" to the same number.
+  3. Chords come out on MIDI channel 1 and bass on channel 2. To play them on different sounds, load two
+     synths on the same port and set each one to listen to one channel, or use Patcher.
+  4. Press Play in FL Studio. The synth plays M1D1's parts in time with your project.
 
-Windows may warn that the files come from an unknown publisher because they are not
-code-signed. Choose "More info" then "Run anyway".
+UNINSTALL
+  Settings > Apps > Installed apps > M1D1 > Uninstall, or double-click Uninstall.bat
+  (in this folder or in C:\Program Files\M1D1). Your exported MIDI and audio in Music\M1D1\Exports is kept.
+  Afterwards run Options > Manage plugins > Find plugins once in FL Studio.
+
+BY HAND (no installer)
+  From a Command Prompt opened as administrator, in this folder:
+      xcopy /E /I /Y M1D1.vst3 "%CommonProgramFiles%\VST3\M1D1.vst3"
+  To remove:
+      rmdir /s /q "%CommonProgramFiles%\VST3\M1D1.vst3"
+
+WINDOWS WARNINGS
+  The files are not code-signed, so Windows SmartScreen may say "Windows protected your PC".
+  Choose "More info", then "Run anyway". The source code is public (AGPLv3).

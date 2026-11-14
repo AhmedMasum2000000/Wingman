@@ -39,42 +39,80 @@ jobs:
           curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip
           7z x -y pluginval.zip -opluginval > /dev/null
           ./pluginval/pluginval.exe --strictness-level 8 --validate-in-process \
-            --validate "build/Backline_artefacts/Release/VST3/Backline.vst3"
+            --validate "build/Backline_artefacts/Release/VST3/M1D1.vst3"
 
       - name: Package
         shell: bash
         run: |
-          mkdir -p dist/Backline
-          cp -r build/Backline_artefacts/Release/VST3/Backline.vst3 dist/Backline/
-          cp build/Backline_artefacts/Release/Standalone/Backline.exe dist/Backline/
-          cp installer/Install.bat installer/README.txt dist/Backline/
-          cd dist && 7z a -tzip ../Backline-Windows.zip Backline > /dev/null
+          version="${{ inputs.version }}"
+          if [ -z "$version" ]; then version=$(sed -n 's/^project(Backline VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt); fi
+          mkdir -p dist/M1D1
+          cp -r build/Backline_artefacts/Release/VST3/M1D1.vst3 dist/M1D1/
+          cp build/Backline_artefacts/Release/Standalone/M1D1.exe dist/M1D1/
+          cp installer/Install.bat installer/Uninstall.bat installer/README.txt dist/M1D1/
+          printf '%s\r\n' "$version" > dist/M1D1/version.txt
+          cd dist && 7z a -tzip ../M1D1-Windows.zip M1D1 > /dev/null
 
-      - name: Test the install script
+      - name: Test the one-line install script
         shell: pwsh
         run: |
-          $env:BACKLINE_ZIP = "$PWD\Backline-Windows.zip"
+          $env:M1D1_ZIP = "$PWD\M1D1-Windows.zip"
           powershell -NoProfile -ExecutionPolicy Bypass -File installer\install.ps1
-          $plugin = Join-Path $env:CommonProgramFiles 'VST3\Backline.vst3\Contents\x86_64-win\Backline.vst3'
+          if ($LASTEXITCODE) { throw "install.ps1 failed with $LASTEXITCODE" }
+          $plugin = Join-Path $env:CommonProgramFiles 'VST3\M1D1.vst3\Contents\x86_64-win\M1D1.vst3'
           if (-not (Test-Path $plugin)) { throw "Plugin was not installed to $plugin" }
-          if (-not (Test-Path (Join-Path $env:ProgramFiles 'Backline\Backline.exe'))) { throw 'Standalone app was not installed' }
-          Write-Host 'Install script works.'
+          if (-not (Test-Path (Join-Path $env:ProgramFiles 'M1D1\M1D1.exe'))) { throw 'Standalone app was not installed' }
+          Write-Host 'install.ps1 works.'
 
-      - name: Test Install.bat from a folder with spaces
+      - name: Test Install.bat from a folder with spaces, replacing an old Backline install
         shell: pwsh
         run: |
-          $plugin = Join-Path $env:CommonProgramFiles 'VST3\Backline.vst3'
-          Remove-Item $plugin -Recurse -Force
+          $vst = Join-Path $env:CommonProgramFiles 'VST3'
+          Remove-Item (Join-Path $vst 'M1D1.vst3') -Recurse -Force
+          New-Item -ItemType Directory -Force -Path (Join-Path $vst 'Backline.vst3\Contents') | Out-Null
           $folder = Join-Path $PWD 'unzip test (1)'
-          Expand-Archive Backline-Windows.zip -DestinationPath $folder
-          cmd /c "`"$folder\Backline\Install.bat`" < NUL"
-          if (-not (Test-Path (Join-Path $plugin 'Contents\x86_64-win\Backline.vst3'))) { throw 'Install.bat did not install the plugin' }
+          Expand-Archive M1D1-Windows.zip -DestinationPath $folder
+          $env:M1D1_QUIET = '1'
+          cmd /c "`"$folder\M1D1\Install.bat`" < NUL"
+          if ($LASTEXITCODE) { throw "Install.bat failed with $LASTEXITCODE" }
+          $app = Join-Path $env:ProgramFiles 'M1D1'
+          $checks = @{
+            'plugin'           = Test-Path (Join-Path $vst 'M1D1.vst3\Contents\x86_64-win\M1D1.vst3')
+            'old Backline gone' = -not (Test-Path (Join-Path $vst 'Backline.vst3'))
+            'app'              = Test-Path (Join-Path $app 'M1D1.exe')
+            'uninstaller'      = Test-Path (Join-Path $app 'Uninstall.bat')
+            'Start menu'       = Test-Path (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'M1D1.lnk')
+            'Apps entry'       = Test-Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\M1D1'
+          }
+          $checks.GetEnumerator() | ForEach-Object { Write-Host ("{0,-18} {1}" -f $_.Key, $_.Value) }
+          if ($checks.Values -contains $false) { throw 'Install.bat did not install everything' }
+          $version = (Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\M1D1').DisplayVersion
+          Write-Host "Registered version $version"
+          if (-not $version -or $version -eq '0.0.0') { throw 'Version was not registered' }
           Write-Host 'Install.bat works.'
+
+      - name: Test Uninstall.bat from the install folder
+        shell: pwsh
+        run: |
+          $app = Join-Path $env:ProgramFiles 'M1D1'
+          $env:M1D1_QUIET = '1'
+          cmd /c "`"$app\Uninstall.bat`" < NUL"
+          Start-Sleep -Seconds 2
+          $left = @(
+            (Join-Path $env:CommonProgramFiles 'VST3\M1D1.vst3'),
+            $app,
+            (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'M1D1.lnk'),
+            (Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'M1D1.lnk'),
+            'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\M1D1',
+            (Join-Path $env:TEMP 'M1D1-uninstall.bat')
+          ) | Where-Object { Test-Path $_ }
+          if ($left) { throw "Uninstall left behind: $($left -join ', ')" }
+          Write-Host 'Uninstall.bat removes everything.'
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: Backline-Windows
+          name: M1D1-Windows
           path: dist
 
       - name: Publish release
@@ -83,19 +121,19 @@ jobs:
         with:
           tag_name: v${{ inputs.version }}
           target_commitish: ${{ github.sha }}
-          name: Backline ${{ inputs.version }}
+          name: M1D1 ${{ inputs.version }}
           prerelease: ${{ inputs.prerelease }}
           make_latest: ${{ inputs.prerelease && 'false' || 'true' }}
           body: |
-            Backline for Windows (64-bit): VST3 plugin and standalone app.
+            M1D1 for Windows (64-bit), a plugin by ACND: VST3 plugin, standalone app, installer and uninstaller.
 
             **Install from Command Prompt**
             ```
             powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/AhmedMasum2000000/Wingman/releases/latest/download/install.ps1 | iex"
             ```
-            Or download `Backline-Windows.zip`, unzip it and double-click `Install.bat`.
+            Or download `M1D1-Windows.zip`, unzip it and double-click `Install.bat`. To remove it, use Settings > Apps > M1D1, or `Uninstall.bat`.
 
             The files are not code-signed, so Windows may show an "unknown publisher" warning.
           files: |
-            Backline-Windows.zip
+            M1D1-Windows.zip
             installer/install.ps1
