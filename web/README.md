@@ -14,6 +14,7 @@ When the page finds JUCE's bridge (`window.__JUCE__`) it runs in plugin mode:
 | `saveMidi`, `dragMidi`  | File dialog / a real Windows drag of the `.mid` file                 |
 | `getTrackAudio`  | The last minute of the track's audio, starting on a bar line, with the song beat it starts on (`startBeat`), the host tempo and its level |
 | `getCaptureInfo` | How many beats of the track have been heard so far (for listening on its own) |
+| `updateStatus`, `updateCheck`, `updateDownload`, `updateSkip`, `updateAuto`, `updateOpenPage` | M1D1's updater (`plugin/Updater.cpp`): its state, ask GitHub now, download and install the new version, skip it, automatic checks on or off, the release page. The plugin sends the state as `update` events |
 
 Inside the DAW the page starts empty (no example chords, no MIDI) and listens to the track on its own the
 first time the host has played one whole 4-bar stretch of the song's grid. When it hears no chords yet (a drums

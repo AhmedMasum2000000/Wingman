@@ -516,6 +516,18 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
 .mrow { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; font: 500 11px/1 var(--f-ui); letter-spacing: .16em; text-transform: uppercase; color: var(--text); }
 .mrow select { height: 34px; padding: 0 10px; background: #0c0c0c; color: var(--ink); border: 0; box-shadow: inset 0 0 0 1px #333; font: 500 13px/1 var(--f-ui); }
 .dialog p.note { font-size: 12.5px; color: var(--hot); min-height: 1em; }
+/* the version next to the logo: it turns into an update button when a new M1D1 is out */
+.verbtn { flex: none; height: 22px; padding: 0 9px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid #2c2c2c; background: rgba(0,0,0,.35);
+  color: #8d8d8d; font: 600 10px/1 var(--f-ui); letter-spacing: .16em; text-transform: uppercase; white-space: nowrap; cursor: pointer; transition: color .2s, border-color .2s; }
+.verbtn[hidden] { display: none; }
+.verbtn:hover { color: #e6e6e6; border-color: #444; }
+.verbtn:focus-visible { outline: 1.5px solid var(--signal); outline-offset: 3px; }
+.verbtn .led { display: none; }
+.verbtn.new { color: var(--hot); border-color: rgba(253,61,0,.55); box-shadow: 0 0 10px rgba(253,61,0,.18); }
+.verbtn.new .led { display: inline-block; }
+.dialog p.upnotes { max-height: 120px; overflow: auto; padding: 10px 12px; background: #0c0c0c; box-shadow: inset 0 0 0 1px #222; font-size: 12.5px; line-height: 1.55; white-space: pre-line; }
+.upbar { height: 6px; background: #0c0c0c; box-shadow: inset 0 0 0 1px #222; }
+.upbar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #e23600, var(--hot)); box-shadow: 0 0 8px rgba(253,61,0,.6); transition: width .3s; }
 .chk { display: flex; gap: 9px; align-items: center; font: 400 13px/1.3 var(--f-ui); color: var(--text); }
 .chk input { accent-color: #fd3d00; width: 15px; height: 15px; }
 .steps { padding: 12px 14px; background: #0c0c0c; box-shadow: inset 0 0 0 1px #222; font: 400 12.5px/1.55 var(--f-ui); color: var(--text); }
@@ -536,6 +548,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     <section class="input" id="input" aria-label="Audio input">
       <div class="mhead">
         <h1 class="logo"><img class="facemark" src="data:image/png;base64,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" alt="">M1D1</h1>
+        <button class="verbtn" id="btnVer" hidden><span class="led xs" id="verLed"></span><span id="verTxt"></span></button>
         <span class="sp"></span>
         <div class="modesw" role="group" aria-label="Mode"><button data-mode="extract" aria-pressed="true" title="Find the key, tempo and chords in your audio and turn them into MIDI">Extract</button><button data-mode="generate" aria-pressed="false" title="Make new MIDI from the key, scale and tempo you choose. No audio needed.">Generate</button></div>
         <span class="sp"></span>
@@ -645,6 +658,16 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
           <li class="hostonly">An instrument on that port plays every part ticked above. To play one part on it, untick the others. Then press Play in FL Studio.</li>
           <li class="hostonly">Keep M1D1 on your audio's own mixer insert, not on the Master or on the instrument's insert, so it does not hear its own MIDI when it listens.</li></ol></div>
         <div class="row"><button class="hw" id="portOk">Done</button></div>
+      </div>
+    </div>
+    <div class="overlay" id="ovUpdate" hidden>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="upT">
+        <h3 id="upT">M1D1 updates</h3>
+        <p id="upMsg" aria-live="polite"></p>
+        <p class="upnotes" id="upNotes" hidden></p>
+        <div class="upbar" id="upBar" hidden><i id="upFill"></i></div>
+        <label class="chk"><input type="checkbox" id="upAuto" checked> Look for a new version when M1D1 opens</label>
+        <div class="row"><button class="hw" id="upPage" hidden>What's new</button><button class="hw" id="upSkip" hidden>Skip this version</button><button class="hw" id="upClose">Close</button><button class="hw" id="upGo">Check now</button></div>
       </div>
     </div>
     </div>
@@ -5103,6 +5126,50 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     const call = (name, ...params) => new Promise(res => { const id = callId++; waiting.set(id, res); be.emitEvent('__juce__invoke', { name, params, resultId: id }); });
     const b64 = bytes => { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); };
     hostCall = call; hostB64 = b64;
+    // Updates: the version next to the logo turns into "Update" when a new M1D1 is out. The dialog downloads it,
+    // the plugin checks it, and it installs when FL Studio is closed. The plugin sends its state as 'update' events.
+    let upS = null, upLast = '';
+    const upPct = s => Math.round(100 * (s.progress || 0));
+    const upShow = s => {
+      if (!s || !s.current) return;
+      upS = s;
+      const fresh = (s.state === 'available' && !s.skipped) || s.state === 'downloading' || s.state === 'ready';
+      const vb = $('#btnVer'), led = $('#verLed');
+      vb.hidden = false; vb.classList.toggle('new', fresh);
+      led.classList.toggle('on', fresh); led.classList.toggle('busy', s.state === 'downloading');
+      $('#verTxt').textContent = s.state === 'ready' ? 'Update ready' : s.state === 'downloading' ? `Updating ${upPct(s)}%` : fresh ? `Update ${s.latest}` : `v${s.current}`;
+      vb.title = fresh ? `M1D1 ${s.latest} is out (you have ${s.current}). Click to update.` : `M1D1 ${s.current}. Click to look for a new version.`;
+      vb.setAttribute('aria-label', vb.title);
+      const mb = s.size > 0 ? ` The download is ${(s.size / 1048576).toFixed(1)} MB.` : '';
+      $('#upMsg').textContent = ({
+        idle: `You have M1D1 ${s.current}.`,
+        checking: 'Looking for a new version on GitHub...',
+        upToDate: s.message || `M1D1 ${s.current} is the latest version.`,
+        available: `M1D1 ${s.latest} is out. You have ${s.current}.${mb}` + (s.skipped ? ' You chose to skip this version.' : ''),
+        downloading: `Downloading M1D1 ${s.latest}... ${upPct(s)}%`,
+        ready: `M1D1 ${s.latest} is downloaded and checked. Close FL Studio: it installs then, and Windows asks for permission once. A window called "M1D1 update" shows how it goes. The next time you open your project, it is the new version.`,
+        failed: s.message || 'Something went wrong. Try again.' })[s.state] || '';
+      const notes = ['available', 'downloading', 'ready'].includes(s.state) ? s.notes : '';
+      $('#upNotes').hidden = !notes; $('#upNotes').textContent = notes || '';
+      $('#upBar').hidden = s.state !== 'downloading'; $('#upFill').style.width = `${upPct(s)}%`;
+      $('#upAuto').checked = !!s.autoCheck;
+      $('#upPage').hidden = !(s.hasPage && ['available', 'downloading', 'ready'].includes(s.state));
+      $('#upSkip').hidden = !(s.state === 'available' && !s.skipped);
+      const go = $('#upGo'), retryDownload = s.state === 'failed' && upLast === 'download', hadFocus = document.activeElement === go;
+      go.textContent = ({ available: 'Update now', downloading: 'Downloading...', checking: 'Checking...', failed: 'Try again' })[s.state] || 'Check now';
+      go.hidden = s.state === 'ready'; go.disabled = s.state === 'checking' || s.state === 'downloading';
+      go.dataset.act = s.state === 'available' || retryDownload ? 'download' : 'check';
+      if (hadFocus && (go.hidden || go.disabled)) $('#upClose').focus();   // keep the keyboard in the dialog
+    };
+    call('updateStatus').then(upShow);
+    be.addEventListener('update', upShow);
+    $('#btnVer').addEventListener('click', () => { openDialog($('#ovUpdate'), $('#upGo').hidden || $('#upGo').disabled ? $('#upClose') : $('#upGo')); call('updateStatus').then(upShow); });
+    $('#upGo').addEventListener('click', () => { const act = $('#upGo').dataset.act; upLast = act; call(act === 'download' ? 'updateDownload' : 'updateCheck', true); });
+    $('#upSkip').addEventListener('click', () => call('updateSkip'));
+    $('#upPage').addEventListener('click', () => call('updateOpenPage'));
+    $('#upClose').addEventListener('click', closeDialogs);
+    $('#upAuto').addEventListener('change', e => call('updateAuto', e.target.checked));
+
     // which parts go out as MIDI (all, unless unticked in the MIDI Out dialog)
     const midiParts = [true, true, true];
     [0, 1, 2].forEach(i => { const cb = $('#mo' + i); if (cb) cb.addEventListener('change', () => { midiParts[i] = cb.checked; }); });

@@ -2,6 +2,9 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "Backline.h"
 #include "WebEngine.h"
+#if M1D1_WEB_UI
+ #include "Updater.h"
+#endif
 #include "Instruments.h"
 
 // Threading: every public function except processBlock / processBlockBypassed may be called from
@@ -329,6 +332,11 @@ private:
     m1d1::Engine webEngine;
     juce::CriticalSection webLock;
     juce::String webState, webSongJson;
+   #if M1D1_WEB_UI
+    // Shared by every M1D1 in the process; kept while the plugin is loaded, so an update that is downloading goes on
+    // when the window is closed. It only goes online when a window asks it to.
+    juce::SharedResourcePointer<m1d1::Updater> updater;
+   #endif
 
     juce::ThreadPool worker { 1 }; // last, so it is stopped before anything its jobs touch is destroyed
 

@@ -14,6 +14,10 @@ on:
         type: boolean
         required: false
         default: true
+      notes:
+        description: "What's new in this version, in a sentence or two. M1D1's update dialog shows it."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -111,6 +115,52 @@ jobs:
           if (-not $version -or $version -eq '0.0.0') { throw 'Version was not registered' }
           Write-Host 'Install.bat works.'
 
+      - name: Ask GitHub for the latest release, as M1D1 does
+        shell: pwsh
+        run: |
+          $env:M1D1_UPDATE_DIR = Join-Path $env:RUNNER_TEMP 'update-real'
+          $out = & build\m1d1_update_tool_artefacts\Release\m1d1_update_tool.exe check
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+          if ($code -eq 2 -and ($out -join "`n") -match 'GitHub is busy') { Write-Host '::warning::GitHub limited the request; the live check was skipped.'; exit 0 }
+          if ($code -ne 0) { throw "The update check failed ($code)" }
+
+      - name: Test the updater end to end (a newer release served from this machine)
+        shell: pwsh
+        run: |
+          # a release 9.9.9: the package just built, with its version changed
+          $root = Join-Path $env:RUNNER_TEMP 'fake-release'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Expand-Archive M1D1-Windows.zip -DestinationPath (Join-Path $root 'src') -Force
+          Set-Content -Path (Join-Path $root 'src\M1D1\version.txt') -Value '9.9.9' -NoNewline
+          Compress-Archive -Path (Join-Path $root 'src\M1D1') -DestinationPath (Join-Path $root 'M1D1-Windows.zip') -Force
+          $zip = Get-Item (Join-Path $root 'M1D1-Windows.zip')
+          $sha = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          @{ tag_name = 'v9.9.9'; name = 'M1D1 9.9.9'; draft = $false; prerelease = $false
+             html_url = 'https://github.com/AhmedMasum2000000/Wingman/releases/tag/v9.9.9'; body = "A test release.`n`n---`nInstall"
+             assets = @(@{ name = 'M1D1-Windows.zip'; browser_download_url = 'http://127.0.0.1:8765/M1D1-Windows.zip'; size = $zip.Length; digest = "sha256:$sha" }) } |
+            ConvertTo-Json -Depth 5 | Set-Content (Join-Path $root 'latest.json')
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $root -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+          try {
+            $env:M1D1_UPDATE_API = 'http://127.0.0.1:8765/latest.json'
+            $env:M1D1_UPDATE_DIR = Join-Path $env:RUNNER_TEMP 'update-settings'
+            & build\m1d1_update_tool_artefacts\Release\m1d1_update_tool.exe update
+            if ($LASTEXITCODE) { throw "The updater did not get the update ready ($LASTEXITCODE)" }
+            # the "M1D1 update" window installs it with the package's own Install.bat
+            $key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\M1D1'
+            $deadline = (Get-Date).AddMinutes(3)
+            do { Start-Sleep -Seconds 2; $v = (Get-ItemProperty $key -ErrorAction SilentlyContinue).DisplayVersion } until ($v -eq '9.9.9' -or (Get-Date) -gt $deadline)
+          } finally { Stop-Process $server -ErrorAction SilentlyContinue }
+          Write-Host "Registered version after the update: $v"
+          if ($v -ne '9.9.9') { throw 'The update did not install' }
+          $app = (Get-Content (Join-Path $env:ProgramFiles 'M1D1\version.txt') -Raw).Trim()
+          if ($app -ne '9.9.9') { throw "Program Files holds version $app" }
+          if (-not (Test-Path (Join-Path $env:CommonProgramFiles 'VST3\M1D1.vst3\Contents\x86_64-win\M1D1.vst3'))) { throw 'The plugin is missing after the update' }
+          Start-Sleep -Seconds 2
+          if (Test-Path (Join-Path ([IO.Path]::GetTempPath()) 'M1D1Update\9.9.9')) { throw 'The downloaded update was not cleaned up' }
+          Write-Host 'The updater downloads, checks and installs a new version.'
+
       - name: Test Uninstall.bat from the install folder
         shell: pwsh
         run: |
@@ -145,6 +195,9 @@ jobs:
           prerelease: ${{ inputs.prerelease }}
           make_latest: ${{ inputs.prerelease && 'false' || 'true' }}
           body: |
+            ${{ inputs.notes }}
+
+            ---
             M1D1 for Windows (64-bit), a plugin by ACND: VST3 plugin, standalone app, installer and uninstaller.
 
             **Install from Command Prompt**
@@ -154,6 +207,7 @@ jobs:
             Or download `M1D1-Windows.zip`, unzip it and double-click `Install.bat`. To remove it, use Settings > Apps > M1D1, or `Uninstall.bat`.
 
             The files are not code-signed, so Windows may show an "unknown publisher" warning.
+            M1D1 0.4.2 and later find new versions on their own: the version next to the logo turns into UPDATE.
           files: |
             M1D1-Windows.zip
             installer/install.ps1

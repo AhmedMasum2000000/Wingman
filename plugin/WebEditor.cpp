@@ -36,9 +36,39 @@ WebEditor::WebEditor (BacklineProcessor& p)
         c->setFixedAspectRatio (4.0 / 3.0);
     setSize (1040, 780);
     startTimerHz (30);
+
+    // M1D1 looks for a new version when its window opens (at most every 12 hours, unless the user turned it off)
+    updater->addChangeListener (this);
+    updater->check (false);
 }
 
-WebEditor::~WebEditor() { stopTimer(); }
+WebEditor::~WebEditor()
+{
+    updater->removeChangeListener (this);
+    stopTimer();
+}
+
+juce::var WebEditor::updateStatus (const m1d1::Updater::Status& s)
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty ("state", m1d1::Updater::stateName (s.state));
+    o->setProperty ("current", s.current);
+    o->setProperty ("latest", s.latest);
+    o->setProperty ("name", s.name);
+    o->setProperty ("notes", s.notes);
+    o->setProperty ("hasPage", s.page.isNotEmpty());
+    o->setProperty ("message", s.message);
+    o->setProperty ("size", (double) s.size);
+    o->setProperty ("progress", s.progress);
+    o->setProperty ("autoCheck", s.autoCheck);
+    o->setProperty ("skipped", s.skipped);
+    return juce::var (o);
+}
+
+void WebEditor::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    browser.emitEventIfBrowserIsVisible ("update", updateStatus (updater->getStatus()));
+}
 
 void WebEditor::paint (juce::Graphics& g) { g.fillAll (juce::Colour (0xff0b0b0b)); }
 
@@ -148,6 +178,38 @@ Options WebEditor::makeOptions()
             o->setProperty ("fromBeat", e.capturedFromBeat.load());
             o->setProperty ("beats", e.capturedBeats.load());
             done (juce::var (o));
+        })
+
+        // updates: the state, ask GitHub now, download and install, skip a version, checks on or off, the release page
+        .withNativeFunction ("updateStatus", [this] (const juce::Array<juce::var>&, Completion done)
+        {
+            done (updateStatus (updater->getStatus()));
+        })
+        .withNativeFunction ("updateCheck", [this] (const juce::Array<juce::var>& a, Completion done)
+        {
+            updater->check (a.isEmpty() || (bool) a[0]);
+            done ({});
+        })
+        .withNativeFunction ("updateDownload", [this] (const juce::Array<juce::var>&, Completion done)
+        {
+            updater->download();
+            done ({});
+        })
+        .withNativeFunction ("updateSkip", [this] (const juce::Array<juce::var>&, Completion done)
+        {
+            updater->skip();
+            done ({});
+        })
+        .withNativeFunction ("updateAuto", [this] (const juce::Array<juce::var>& a, Completion done)
+        {
+            if (! a.isEmpty()) updater->setAutoCheck ((bool) a[0]);
+            done ({});
+        })
+        .withNativeFunction ("updateOpenPage", [this] (const juce::Array<juce::var>&, Completion done)
+        {
+            const auto s = updater->getStatus();
+            if (s.page.isNotEmpty()) juce::URL (s.page).launchInDefaultBrowser();
+            done ({});
         })
 
         // Listen to track: the audio the host played through this track

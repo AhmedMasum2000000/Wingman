@@ -33,6 +33,18 @@ and desktop shortcuts) and an uninstaller, and removes an older Backline install
 Options > Manage plugins > Find plugins. To remove M1D1, use Settings > Apps > M1D1 or `Uninstall.bat`.
 The files are not code-signed, so Windows may show an "unknown publisher" warning.
 
+### Updates
+
+From 0.4.2 on, M1D1 finds new versions itself. When its window opens it asks GitHub for the latest full release
+(at most twice a day; nothing about you is sent). When a newer one is out, the version next to the logo turns into
+**Update**. Click it, then **Update now**: M1D1 downloads the release's `M1D1-Windows.zip`, checks its size, its
+SHA-256 checksum and its contents, and opens a small "M1D1 update" window. Close FL Studio and it installs the new
+version with the package's own `Install.bat` (Windows asks for permission once). Pre-releases are never offered.
+Automatic checks can be turned off in the same dialog.
+
+To publish an update: Actions > Build > Run workflow, with a version (for example `0.4.3`), the beta box unticked and
+a sentence for "What's new". Every M1D1 from 0.4.2 on will offer it.
+
 ## Using it
 
 1. Put M1D1 on the audio track you want to build around.
@@ -54,6 +66,8 @@ ctest --test-dir build -C Release --output-on-failure
 The plugin ends up in `build/Backline_artefacts/Release/`. Every push builds the Windows
 version in GitHub Actions, validates it with pluginval and uploads an `M1D1-Windows`
 package containing `M1D1.vst3`, the standalone `M1D1.exe`, `Install.bat` and `Uninstall.bat`.
+It also tests the updater end to end: a newer release served on the build machine is found, downloaded,
+checked and installed (`tests/UpdateTool.cpp`, `plugin/Updater.cpp`).
 
 On Linux install first: `libasound2-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev
 libxext-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev`.

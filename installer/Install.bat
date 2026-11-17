@@ -7,6 +7,8 @@ rem   the standalone app -> %ProgramFiles%\M1D1\M1D1.exe, with Start menu and de
 rem   the uninstaller    -> %ProgramFiles%\M1D1\Uninstall.bat, also listed in Settings > Apps
 rem Set M1D1_QUIET=1 to skip the pauses (used by the automatic tests).
 
+rem "quiet" as the second argument: no pauses (used by M1D1's own updater)
+if /i "%~2"=="quiet" set "M1D1_QUIET=1"
 if /i "%~1"=="elevated" goto install
 net session >nul 2>&1
 if %errorlevel% equ 0 goto install

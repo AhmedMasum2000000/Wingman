@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Backline VERSION 0.4.1 LANGUAGES C CXX)
+project(Backline VERSION 0.4.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -65,13 +65,14 @@ if(BACKLINE_BUILD_PLUGIN)
     set_target_properties(M1D1Web PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
     target_sources(Backline PRIVATE plugin/PluginProcessor.cpp plugin/PluginEditor.cpp plugin/Instruments.cpp
-        plugin/WebEngine.cpp plugin/WebEditor.cpp)
+        plugin/WebEngine.cpp plugin/WebEditor.cpp plugin/Updater.cpp)
     target_compile_definitions(Backline PUBLIC
+        M1D1_VERSION="${PROJECT_VERSION}"
         M1D1_WEB_UI=1 JUCE_WEB_BROWSER=1 JUCE_USE_WIN_WEBVIEW2_WITH_STATIC_LINKING=1
         JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0
         JUCE_DISPLAY_SPLASH_SCREEN=0)
     target_link_libraries(Backline
-        PRIVATE backline_core BacklineAssets M1D1Web juce::juce_audio_utils juce::juce_gui_extra
+        PRIVATE backline_core BacklineAssets M1D1Web juce::juce_audio_utils juce::juce_gui_extra juce::juce_cryptography
         PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_libraries(Backline PRIVATE juce::pkgconfig_JUCE_BROWSER_LINUX_DEPS)   # GTK and WebKit for the web view
@@ -79,11 +80,19 @@ if(BACKLINE_BUILD_PLUGIN)
 
     juce_add_console_app(backline_plugin_tests)
     target_sources(backline_plugin_tests PRIVATE
-        tests/PluginTests.cpp plugin/PluginProcessor.cpp plugin/PluginEditor.cpp plugin/Instruments.cpp plugin/WebEngine.cpp)
+        tests/PluginTests.cpp plugin/PluginProcessor.cpp plugin/PluginEditor.cpp plugin/Instruments.cpp plugin/WebEngine.cpp
+        plugin/Updater.cpp)
     target_compile_definitions(backline_plugin_tests PRIVATE
-        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
-    target_link_libraries(backline_plugin_tests PRIVATE backline_core BacklineAssets juce::juce_audio_utils)
+        M1D1_VERSION="${PROJECT_VERSION}" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_link_libraries(backline_plugin_tests PRIVATE backline_core BacklineAssets juce::juce_audio_utils juce::juce_cryptography)
     add_test(NAME plugin COMMAND backline_plugin_tests)
+
+    # M1D1's updater from the command line, for the build's end-to-end test (check, download, verify, install)
+    juce_add_console_app(m1d1_update_tool)
+    target_sources(m1d1_update_tool PRIVATE tests/UpdateTool.cpp plugin/Updater.cpp)
+    target_compile_definitions(m1d1_update_tool PRIVATE M1D1_VERSION="${PROJECT_VERSION}" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(m1d1_update_tool PRIVATE juce::juce_events juce::juce_cryptography
+        PUBLIC juce::juce_recommended_config_flags)
 
     juce_add_console_app(backline_screenshot)
     target_sources(backline_screenshot PRIVATE

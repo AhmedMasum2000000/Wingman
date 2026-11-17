@@ -1,6 +1,9 @@
 // End-to-end test of the plugin processor without a DAW: feeds audio with a fake transport,
 // then checks the analysis result, the preview sound, MIDI export and session save/restore.
 #include "../plugin/PluginEditor.h"
+#include "../plugin/Updater.h"
+#include <juce_cryptography/juce_cryptography.h>
+#include <cstdlib>
 #include <map>
 
 static int failures = 0;
@@ -210,6 +213,7 @@ static juce::String chordNames (const BacklineProcessor& p)
 static void versionTwoTests();
 static void editorTests();
 static void webEngineTests();
+static void updaterTests();
 
 int main()
 {
@@ -530,6 +534,7 @@ int main()
     versionTwoTests();
     editorTests();
     webEngineTests();
+    updaterTests();
     testFolder().deleteRecursively();
 
     std::printf (failures == 0 ? "All plugin tests passed\n" : "%d check(s) failed\n", failures);
@@ -1663,4 +1668,228 @@ static void webEngineTests()
         q.setStateInformation (state.getData(), (int) state.getSize());
         CHECK (q.getWebState() == "{\"v\":1}" && q.getWebEngine().hasSong());
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The updater: versions, GitHub's release answer, the package, and the whole check -> download -> verify flow
+// against a release kept in local files (M1D1_UPDATE_API), so no network is needed.
+static void setEnv (const char* name, const juce::String& value)
+{
+   #if JUCE_WINDOWS
+    _putenv_s (name, value.toRawUTF8());
+   #else
+    if (value.isEmpty()) ::unsetenv (name); else ::setenv (name, value.toRawUTF8(), 1);
+   #endif
+}
+
+static m1d1::Updater::Status waitUpdater (m1d1::Updater& u, std::initializer_list<m1d1::Updater::State> busy, int ms = 20000)
+{
+    const auto until = juce::Time::getMillisecondCounter() + (juce::uint32) ms;
+    auto s = u.getStatus();
+    while (std::find (busy.begin(), busy.end(), s.state) != busy.end() && juce::Time::getMillisecondCounter() < until)
+    {
+        juce::Thread::sleep (20);
+        s = u.getStatus();
+    }
+    return s;
+}
+
+// a package like the build's M1D1-Windows.zip: M1D1/Install.bat, M1D1.exe, the plugin and version.txt
+static juce::File makePackage (const juce::File& folder, const juce::String& version, bool withExe = true, const juce::String& extraEntry = {})
+{
+    const auto src = folder.getChildFile ("src").getChildFile ("M1D1");
+    src.deleteRecursively();
+    src.getChildFile ("M1D1.vst3/Contents/x86_64-win").createDirectory();
+    src.getChildFile ("M1D1.vst3/Contents/x86_64-win/M1D1.vst3").replaceWithText ("plugin " + version);
+    src.getChildFile ("Install.bat").replaceWithText ("@echo off\r\nexit /b 0\r\n");
+    if (withExe) src.getChildFile ("M1D1.exe").replaceWithText ("app");
+    src.getChildFile ("version.txt").replaceWithText (version + "\r\n");
+    juce::ZipFile::Builder zb;
+    for (const auto& f : src.findChildFiles (juce::File::findFiles, true))
+        zb.addFile (f, 6, "M1D1/" + f.getRelativePathFrom (src).replaceCharacter ('\\', '/'));
+    if (extraEntry.isNotEmpty()) zb.addFile (src.getChildFile ("version.txt"), 6, extraEntry);
+    const auto zip = folder.getChildFile ("M1D1-Windows.zip");
+    zip.deleteFile();
+    juce::FileOutputStream out (zip);
+    zb.writeToStream (out, nullptr);
+    return zip;
+}
+
+static juce::String releaseJson (const juce::String& tag, const juce::String& zipUrl, juce::int64 size, const juce::String& sha256,
+                                 bool prerelease = false, const juce::String& page = "https://github.com/AhmedMasum2000000/Wingman/releases/tag/v1")
+{
+    return "{\"tag_name\":\"" + tag + "\",\"name\":\"M1D1 " + tag.substring (1) + "\",\"draft\":false,\"prerelease\":" + (prerelease ? "true" : "false")
+         + ",\"html_url\":\"" + page + "\",\"body\":\"Chords read faster.\\r\\n**New:** an `update` button\\n\\n---\\n**Install from Command Prompt**\\nirm ...\","
+         + "\"assets\":[{\"name\":\"install.ps1\",\"browser_download_url\":\"https://example.com/x\",\"size\":10},"
+         + "{\"name\":\"M1D1-Windows.zip\",\"browser_download_url\":\"" + zipUrl + "\",\"size\":" + juce::String (size)
+         + (sha256.isNotEmpty() ? ",\"digest\":\"sha256:" + sha256 + "\"" : juce::String()) + "}]}";
+}
+
+static void updaterTests()
+{
+    using m1d1::compareVersions;
+    using State = m1d1::Updater::State;
+    std::printf ("updater\n");
+
+    // versions
+    CHECK (compareVersions ("0.4.2", "0.4.10") < 0);
+    CHECK (compareVersions ("v0.5.0", "0.4.9") > 0);
+    CHECK (compareVersions ("0.4.2", "v0.4.2") == 0);
+    CHECK (compareVersions ("0.4", "0.4.0") == 0);
+    CHECK (compareVersions ("0.5.0-beta.1", "0.5.0") < 0);
+    CHECK (compareVersions ("0.5.0-beta.2", "0.5.0-beta.10") < 0);
+    CHECK (compareVersions ("0.5.0-alpha", "0.5.0-beta") < 0);
+    CHECK (compareVersions ("1.0.0", "0.99.99") > 0);
+    CHECK (compareVersions (m1d1::Updater::currentVersion(), "0.4.1") > 0);   // this build is newer than the last release without it
+
+    // GitHub's release answer
+    {
+        const auto r = m1d1::parseRelease (releaseJson ("v0.5.0", "https://github.com/AhmedMasum2000000/Wingman/releases/download/v0.5.0/M1D1-Windows.zip",
+                                                        14000000, juce::String::repeatedString ("ab", 32)));
+        CHECK (r.has_value());
+        if (r)
+        {
+            CHECK (r->version == "0.5.0");
+            CHECK (r->name == "M1D1 0.5.0");
+            CHECK (r->zipSize == 14000000);
+            CHECK (r->sha256 == juce::String::repeatedString ("ab", 32));
+            CHECK (r->notes == "Chords read faster.\nNew: an update button");   // what is new only, without the install text
+            CHECK (r->page.startsWith ("https://github.com/AhmedMasum2000000/Wingman/"));
+        }
+        CHECK (! m1d1::parseRelease (releaseJson ("v0.6.0-beta.1", "https://x", 1, {}, true)).has_value());        // pre-release
+        CHECK (! m1d1::parseRelease (R"({"tag_name":"v1.0.0","draft":true})").has_value());                       // draft
+        CHECK (! m1d1::parseRelease (R"({"tag_name":"nightly"})").has_value());                                    // no version
+        CHECK (! m1d1::parseRelease ("<html>rate limited</html>").has_value());
+        const auto noZip = m1d1::parseRelease (R"({"tag_name":"v0.9.0","assets":[{"name":"Backline-Windows.zip","browser_download_url":"https://x","size":5}]})");
+        CHECK (noZip.has_value() && noZip->zipUrl.isEmpty());
+        const auto elsewhere = m1d1::parseRelease (releaseJson ("v0.9.0", "https://x/M1D1-Windows.zip", 5, {}, false, "https://evil.example/page"));
+        CHECK (elsewhere.has_value() && elsewhere->page.isEmpty());   // only this project's release page is opened
+        const auto badDigest = m1d1::parseRelease (releaseJson ("v0.9.0", "https://x", 5, "nothex"));
+        CHECK (badDigest.has_value() && badDigest->sha256.isEmpty());
+    }
+
+    const auto root = testFolder().getChildFile ("updater");
+    root.deleteRecursively();
+    root.createDirectory();
+
+    // the package and unpacking it
+    {
+        const auto dir = root.getChildFile ("pkg");
+        const auto zip = makePackage (dir, "9.9.9");
+        const auto out = dir.getChildFile ("out");
+        CHECK (m1d1::unpackZip (zip, out).isEmpty());
+        CHECK (m1d1::checkPackage (out, "9.9.9").isEmpty());
+        CHECK (m1d1::checkPackage (out, "9.9.8").contains ("holds M1D1 9.9.9"));
+        const auto noExe = makePackage (dir.getChildFile ("b"), "9.9.9", false);
+        CHECK (m1d1::unpackZip (noExe, dir.getChildFile ("b/out")).isEmpty());
+        CHECK (m1d1::checkPackage (dir.getChildFile ("b/out"), "9.9.9").contains ("M1D1 app"));
+        // an entry that climbs out of the folder is refused before anything is written
+        const auto evil = makePackage (dir.getChildFile ("c"), "9.9.9", true, "../escaped.txt");
+        CHECK (m1d1::unpackZip (evil, dir.getChildFile ("c/out")).contains ("outside its folder"));
+        CHECK (! dir.getChildFile ("c/escaped.txt").exists() && ! dir.getChildFile ("c/out").exists());
+        juce::File notZip = dir.getChildFile ("not.zip");
+        notZip.replaceWithText ("hello");
+        CHECK (m1d1::unpackZip (notZip, dir.getChildFile ("d")).contains ("not a zip"));
+    }
+
+    // the whole flow, with the release and the download in local files
+    setEnv ("M1D1_UPDATE_DIR", root.getChildFile ("settings").getFullPathName());
+    setEnv ("M1D1_UPDATE_NO_LAUNCH", "1");
+    const auto api = root.getChildFile ("latest.json");
+    setEnv ("M1D1_UPDATE_API", juce::URL (api).toString (false));
+    const auto zip = makePackage (root.getChildFile ("rel"), "9.9.9");
+    const auto sha = juce::SHA256 (zip).toHexString();
+    api.replaceWithText (releaseJson ("v9.9.9", juce::URL (zip).toString (false), zip.getSize(), sha));
+    {
+        m1d1::Updater u;
+        u.check (true);
+        auto s = waitUpdater (u, { State::idle, State::checking });
+        CHECK (s.state == State::available);
+        CHECK (s.latest == "9.9.9" && s.current == m1d1::Updater::currentVersion() && s.size == zip.getSize());
+        CHECK (s.notes.startsWith ("Chords read faster."));
+        CHECK (! s.skipped);
+        u.download();
+        s = waitUpdater (u, { State::available, State::downloading });
+        CHECK (s.state == State::ready);
+        CHECK (s.message.isEmpty());
+        CHECK (juce::File (s.folder).getChildFile ("unpacked/M1D1/version.txt").loadFileAsString().trim() == "9.9.9");
+        CHECK (juce::File (s.folder).getChildFile ("M1D1-Windows.zip").getSize() == zip.getSize());
+        // asking again while an update is ready changes nothing
+        u.check (true);
+        juce::Thread::sleep (200);
+        CHECK (u.getStatus().state == State::ready);
+    }
+    {
+        // the answer is kept for 12 hours: a later window does not ask GitHub again unless told to
+        api.replaceWithText (releaseJson ("v9.9.10", juce::URL (zip).toString (false), zip.getSize(), sha));
+        m1d1::Updater u;
+        u.check (false);
+        auto s = waitUpdater (u, { State::idle, State::checking });
+        CHECK (s.state == State::available && s.latest == "9.9.9");
+        u.check (true);
+        juce::Thread::sleep (50);
+        s = waitUpdater (u, { State::available, State::checking }, 3000);
+        s = u.getStatus();
+        CHECK (s.latest == "9.9.10");
+        // skipping a version is remembered
+        u.skip();
+        CHECK (u.getStatus().skipped);
+        // the download is version 9.9.9, not 9.9.10: it is refused
+        u.download();
+        s = waitUpdater (u, { State::available, State::downloading });
+        CHECK (s.state == State::failed && s.message.contains ("holds M1D1 9.9.9"));
+    }
+    {
+        m1d1::Updater u;   // a new window: the skip is still there
+        u.check (false);
+        const auto s = waitUpdater (u, { State::idle, State::checking });
+        CHECK (s.latest == "9.9.10" && s.skipped);
+        // checks turned off: opening a window does not check
+        u.setAutoCheck (false);
+    }
+    {
+        m1d1::Updater u;
+        CHECK (! u.getStatus().autoCheck);
+        u.check (false);
+        juce::Thread::sleep (200);
+        CHECK (u.getStatus().state == State::idle);
+        u.setAutoCheck (true);
+    }
+    {
+        // a damaged download (its checksum does not match) is never unpacked
+        api.replaceWithText (releaseJson ("v9.9.9", juce::URL (zip).toString (false), zip.getSize(), juce::String::repeatedString ("0", 64)));
+        m1d1::Updater u;
+        u.check (true);
+        auto s = waitUpdater (u, { State::idle, State::checking });
+        CHECK (s.state == State::available);
+        u.download();
+        s = waitUpdater (u, { State::available, State::downloading });
+        CHECK (s.state == State::failed && s.message.contains ("checksum"));
+        CHECK (! juce::File (s.folder).getChildFile ("unpacked").exists());
+        // a short download is refused too
+        api.replaceWithText (releaseJson ("v9.9.9", juce::URL (zip).toString (false), zip.getSize() + 100, {}));
+        u.check (true);
+        s = waitUpdater (u, { State::failed, State::checking }, 3000);
+        s = waitUpdater (u, { State::idle, State::checking });
+        u.download();
+        s = waitUpdater (u, { State::available, State::downloading });
+        CHECK (s.state == State::failed && s.message.contains ("stopped before the end"));
+    }
+    {
+        // no release at all yet, and the current version: up to date
+        api.deleteFile();
+        m1d1::Updater u;
+        u.check (true);
+        auto s = waitUpdater (u, { State::idle, State::checking });
+        CHECK (s.state == State::upToDate);
+        api.replaceWithText (releaseJson ("v" + m1d1::Updater::currentVersion(), juce::URL (zip).toString (false), zip.getSize(), {}));
+        u.check (true);
+        juce::Thread::sleep (50);
+        s = waitUpdater (u, { State::upToDate, State::checking }, 1000);
+        s = u.getStatus();
+        CHECK (s.state == State::upToDate && s.latest == m1d1::Updater::currentVersion());
+    }
+    setEnv ("M1D1_UPDATE_API", {});
+    setEnv ("M1D1_UPDATE_DIR", {});
+    setEnv ("M1D1_UPDATE_NO_LAUNCH", {});
 }

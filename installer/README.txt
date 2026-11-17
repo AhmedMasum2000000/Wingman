@@ -45,6 +45,13 @@ USE IT IN FL STUDIO
      parts you want (for example only Chords for a piano).
   4. Press Play in FL Studio. The synth plays M1D1's parts in time with your project.
 
+UPDATES
+  M1D1 looks for a new version on its GitHub page when its window opens (at most twice a day).
+  When one is out, the version next to the M1D1 logo turns into UPDATE. Click it, then UPDATE NOW.
+  M1D1 downloads and checks the new version, then a window called "M1D1 update" opens: close FL Studio
+  and it installs (Windows asks for permission once). Your projects and exported files are kept.
+  You can turn the automatic check off in the same window.
+
 UNINSTALL
   Settings > Apps > Installed apps > M1D1 > Uninstall, or double-click Uninstall.bat
   (in this folder or in C:\Program Files\M1D1). Your exported MIDI and audio in Music\M1D1\Exports is kept.

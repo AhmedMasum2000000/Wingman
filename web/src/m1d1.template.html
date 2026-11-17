@@ -463,6 +463,18 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
 .mrow { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; font: 500 11px/1 var(--f-ui); letter-spacing: .16em; text-transform: uppercase; color: var(--text); }
 .mrow select { height: 34px; padding: 0 10px; background: #0c0c0c; color: var(--ink); border: 0; box-shadow: inset 0 0 0 1px #333; font: 500 13px/1 var(--f-ui); }
 .dialog p.note { font-size: 12.5px; color: var(--hot); min-height: 1em; }
+/* the version next to the logo: it turns into an update button when a new M1D1 is out */
+.verbtn { flex: none; height: 22px; padding: 0 9px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid #2c2c2c; background: rgba(0,0,0,.35);
+  color: #8d8d8d; font: 600 10px/1 var(--f-ui); letter-spacing: .16em; text-transform: uppercase; white-space: nowrap; cursor: pointer; transition: color .2s, border-color .2s; }
+.verbtn[hidden] { display: none; }
+.verbtn:hover { color: #e6e6e6; border-color: #444; }
+.verbtn:focus-visible { outline: 1.5px solid var(--signal); outline-offset: 3px; }
+.verbtn .led { display: none; }
+.verbtn.new { color: var(--hot); border-color: rgba(253,61,0,.55); box-shadow: 0 0 10px rgba(253,61,0,.18); }
+.verbtn.new .led { display: inline-block; }
+.dialog p.upnotes { max-height: 120px; overflow: auto; padding: 10px 12px; background: #0c0c0c; box-shadow: inset 0 0 0 1px #222; font-size: 12.5px; line-height: 1.55; white-space: pre-line; }
+.upbar { height: 6px; background: #0c0c0c; box-shadow: inset 0 0 0 1px #222; }
+.upbar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #e23600, var(--hot)); box-shadow: 0 0 8px rgba(253,61,0,.6); transition: width .3s; }
 .chk { display: flex; gap: 9px; align-items: center; font: 400 13px/1.3 var(--f-ui); color: var(--text); }
 .chk input { accent-color: #fd3d00; width: 15px; height: 15px; }
 .steps { padding: 12px 14px; background: #0c0c0c; box-shadow: inset 0 0 0 1px #222; font: 400 12.5px/1.55 var(--f-ui); color: var(--text); }
@@ -483,6 +495,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     <section class="input" id="input" aria-label="Audio input">
       <div class="mhead">
         <h1 class="logo"><img class="facemark" src="@@FACELOGO@@" alt="">M1D1</h1>
+        <button class="verbtn" id="btnVer" hidden><span class="led xs" id="verLed"></span><span id="verTxt"></span></button>
         <span class="sp"></span>
         <div class="modesw" role="group" aria-label="Mode"><button data-mode="extract" aria-pressed="true" title="Find the key, tempo and chords in your audio and turn them into MIDI">Extract</button><button data-mode="generate" aria-pressed="false" title="Make new MIDI from the key, scale and tempo you choose. No audio needed.">Generate</button></div>
         <span class="sp"></span>
@@ -592,6 +605,16 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
           <li class="hostonly">An instrument on that port plays every part ticked above. To play one part on it, untick the others. Then press Play in FL Studio.</li>
           <li class="hostonly">Keep M1D1 on your audio's own mixer insert, not on the Master or on the instrument's insert, so it does not hear its own MIDI when it listens.</li></ol></div>
         <div class="row"><button class="hw" id="portOk">Done</button></div>
+      </div>
+    </div>
+    <div class="overlay" id="ovUpdate" hidden>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="upT">
+        <h3 id="upT">M1D1 updates</h3>
+        <p id="upMsg" aria-live="polite"></p>
+        <p class="upnotes" id="upNotes" hidden></p>
+        <div class="upbar" id="upBar" hidden><i id="upFill"></i></div>
+        <label class="chk"><input type="checkbox" id="upAuto" checked> Look for a new version when M1D1 opens</label>
+        <div class="row"><button class="hw" id="upPage" hidden>What's new</button><button class="hw" id="upSkip" hidden>Skip this version</button><button class="hw" id="upClose">Close</button><button class="hw" id="upGo">Check now</button></div>
       </div>
     </div>
     </div>
@@ -2076,6 +2099,50 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     const call = (name, ...params) => new Promise(res => { const id = callId++; waiting.set(id, res); be.emitEvent('__juce__invoke', { name, params, resultId: id }); });
     const b64 = bytes => { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); };
     hostCall = call; hostB64 = b64;
+    // Updates: the version next to the logo turns into "Update" when a new M1D1 is out. The dialog downloads it,
+    // the plugin checks it, and it installs when FL Studio is closed. The plugin sends its state as 'update' events.
+    let upS = null, upLast = '';
+    const upPct = s => Math.round(100 * (s.progress || 0));
+    const upShow = s => {
+      if (!s || !s.current) return;
+      upS = s;
+      const fresh = (s.state === 'available' && !s.skipped) || s.state === 'downloading' || s.state === 'ready';
+      const vb = $('#btnVer'), led = $('#verLed');
+      vb.hidden = false; vb.classList.toggle('new', fresh);
+      led.classList.toggle('on', fresh); led.classList.toggle('busy', s.state === 'downloading');
+      $('#verTxt').textContent = s.state === 'ready' ? 'Update ready' : s.state === 'downloading' ? `Updating ${upPct(s)}%` : fresh ? `Update ${s.latest}` : `v${s.current}`;
+      vb.title = fresh ? `M1D1 ${s.latest} is out (you have ${s.current}). Click to update.` : `M1D1 ${s.current}. Click to look for a new version.`;
+      vb.setAttribute('aria-label', vb.title);
+      const mb = s.size > 0 ? ` The download is ${(s.size / 1048576).toFixed(1)} MB.` : '';
+      $('#upMsg').textContent = ({
+        idle: `You have M1D1 ${s.current}.`,
+        checking: 'Looking for a new version on GitHub...',
+        upToDate: s.message || `M1D1 ${s.current} is the latest version.`,
+        available: `M1D1 ${s.latest} is out. You have ${s.current}.${mb}` + (s.skipped ? ' You chose to skip this version.' : ''),
+        downloading: `Downloading M1D1 ${s.latest}... ${upPct(s)}%`,
+        ready: `M1D1 ${s.latest} is downloaded and checked. Close FL Studio: it installs then, and Windows asks for permission once. A window called "M1D1 update" shows how it goes. The next time you open your project, it is the new version.`,
+        failed: s.message || 'Something went wrong. Try again.' })[s.state] || '';
+      const notes = ['available', 'downloading', 'ready'].includes(s.state) ? s.notes : '';
+      $('#upNotes').hidden = !notes; $('#upNotes').textContent = notes || '';
+      $('#upBar').hidden = s.state !== 'downloading'; $('#upFill').style.width = `${upPct(s)}%`;
+      $('#upAuto').checked = !!s.autoCheck;
+      $('#upPage').hidden = !(s.hasPage && ['available', 'downloading', 'ready'].includes(s.state));
+      $('#upSkip').hidden = !(s.state === 'available' && !s.skipped);
+      const go = $('#upGo'), retryDownload = s.state === 'failed' && upLast === 'download', hadFocus = document.activeElement === go;
+      go.textContent = ({ available: 'Update now', downloading: 'Downloading...', checking: 'Checking...', failed: 'Try again' })[s.state] || 'Check now';
+      go.hidden = s.state === 'ready'; go.disabled = s.state === 'checking' || s.state === 'downloading';
+      go.dataset.act = s.state === 'available' || retryDownload ? 'download' : 'check';
+      if (hadFocus && (go.hidden || go.disabled)) $('#upClose').focus();   // keep the keyboard in the dialog
+    };
+    call('updateStatus').then(upShow);
+    be.addEventListener('update', upShow);
+    $('#btnVer').addEventListener('click', () => { openDialog($('#ovUpdate'), $('#upGo').hidden || $('#upGo').disabled ? $('#upClose') : $('#upGo')); call('updateStatus').then(upShow); });
+    $('#upGo').addEventListener('click', () => { const act = $('#upGo').dataset.act; upLast = act; call(act === 'download' ? 'updateDownload' : 'updateCheck', true); });
+    $('#upSkip').addEventListener('click', () => call('updateSkip'));
+    $('#upPage').addEventListener('click', () => call('updateOpenPage'));
+    $('#upClose').addEventListener('click', closeDialogs);
+    $('#upAuto').addEventListener('change', e => call('updateAuto', e.target.checked));
+
     // which parts go out as MIDI (all, unless unticked in the MIDI Out dialog)
     const midiParts = [true, true, true];
     [0, 1, 2].forEach(i => { const cb = $('#mo' + i); if (cb) cb.addEventListener('change', () => { midiParts[i] = cb.checked; }); });
