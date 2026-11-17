@@ -48,7 +48,7 @@ WebEditor::~WebEditor()
     stopTimer();
 }
 
-juce::var WebEditor::updateStatus (const m1d1::Updater::Status& s)
+juce::var WebEditor::updateStatus (const m1d1::Updater::Status& s) const
 {
     auto* o = new juce::DynamicObject();
     o->setProperty ("state", m1d1::Updater::stateName (s.state));
@@ -62,6 +62,12 @@ juce::var WebEditor::updateStatus (const m1d1::Updater::Status& s)
     o->setProperty ("progress", s.progress);
     o->setProperty ("autoCheck", s.autoCheck);
     o->setProperty ("skipped", s.skipped);
+    o->setProperty ("downloadFailed", s.downloadFailed);
+    o->setProperty ("launched", s.launched);
+    o->setProperty ("installed", s.installed);
+    o->setProperty ("folder", s.folder);
+    // the words differ: the app closes itself, the plugin needs its DAW closed
+    o->setProperty ("standalone", processor.wrapperType == juce::AudioProcessor::wrapperType_Standalone);
     return juce::var (o);
 }
 

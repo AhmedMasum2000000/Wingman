@@ -17,7 +17,7 @@ public:
 private:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster*) override;   // the updater's state, sent to the page
-    static juce::var updateStatus (const m1d1::Updater::Status&);
+    juce::var updateStatus (const m1d1::Updater::Status&) const;
     juce::WebBrowserComponent::Options makeOptions();
     std::optional<juce::WebBrowserComponent::Resource> getResource (const juce::String& url);
 

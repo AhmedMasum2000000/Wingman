@@ -1676,10 +1676,23 @@ static void webEngineTests()
 static void setEnv (const char* name, const juce::String& value)
 {
    #if JUCE_WINDOWS
-    _putenv_s (name, value.toRawUTF8());
+    _wputenv_s (juce::String (name).toWideCharPointer(), value.toWideCharPointer());   // wide: a non-ASCII temp path survives
    #else
     if (value.isEmpty()) ::unsetenv (name); else ::setenv (name, value.toRawUTF8(), 1);
    #endif
+}
+
+// waits until the updater's state satisfies `done` (or 20 s pass), and returns it
+static m1d1::Updater::Status waitUntil (m1d1::Updater& u, const std::function<bool (const m1d1::Updater::Status&)>& done, int ms = 20000)
+{
+    const auto until = juce::Time::getMillisecondCounter() + (juce::uint32) ms;
+    auto s = u.getStatus();
+    while (! done (s) && juce::Time::getMillisecondCounter() < until)
+    {
+        juce::Thread::sleep (10);
+        s = u.getStatus();
+    }
+    return s;
 }
 
 static m1d1::Updater::Status waitUpdater (m1d1::Updater& u, std::initializer_list<m1d1::Updater::State> busy, int ms = 20000)
@@ -1793,13 +1806,16 @@ static void updaterTests()
     }
 
     // the whole flow, with the release and the download in local files
+    using Status = m1d1::Updater::Status;
     setEnv ("M1D1_UPDATE_DIR", root.getChildFile ("settings").getFullPathName());
     setEnv ("M1D1_UPDATE_NO_LAUNCH", "1");
     const auto api = root.getChildFile ("latest.json");
     setEnv ("M1D1_UPDATE_API", juce::URL (api).toString (false));
     const auto zip = makePackage (root.getChildFile ("rel"), "9.9.9");
+    const auto zipUrl = juce::URL (zip).toString (false);
     const auto sha = juce::SHA256 (zip).toHexString();
-    api.replaceWithText (releaseJson ("v9.9.9", juce::URL (zip).toString (false), zip.getSize(), sha));
+    api.replaceWithText (releaseJson ("v9.9.9", zipUrl, zip.getSize(), sha));
+    juce::StringArray folders;   // downloads made here, removed at the end
     {
         m1d1::Updater u;
         u.check (true);
@@ -1807,11 +1823,14 @@ static void updaterTests()
         CHECK (s.state == State::available);
         CHECK (s.latest == "9.9.9" && s.current == m1d1::Updater::currentVersion() && s.size == zip.getSize());
         CHECK (s.notes.startsWith ("Chords read faster."));
-        CHECK (! s.skipped);
+        CHECK (! s.skipped && ! s.downloadFailed);
         u.download();
         s = waitUpdater (u, { State::available, State::downloading });
+        folders.add (s.folder);
         CHECK (s.state == State::ready);
-        CHECK (s.message.isEmpty());
+        CHECK (s.message.isEmpty() && ! s.launched && ! s.installed);
+        CHECK (juce::File (s.folder).getParentDirectory() == m1d1::Updater::downloadsFolder());
+        CHECK (juce::File (s.folder).getFileName().startsWith ("9.9.9-"));
         CHECK (juce::File (s.folder).getChildFile ("unpacked/M1D1/version.txt").loadFileAsString().trim() == "9.9.9");
         CHECK (juce::File (s.folder).getChildFile ("M1D1-Windows.zip").getSize() == zip.getSize());
         // asking again while an update is ready changes nothing
@@ -1821,23 +1840,31 @@ static void updaterTests()
     }
     {
         // the answer is kept for 12 hours: a later window does not ask GitHub again unless told to
-        api.replaceWithText (releaseJson ("v9.9.10", juce::URL (zip).toString (false), zip.getSize(), sha));
+        api.replaceWithText (releaseJson ("v9.9.10", zipUrl, zip.getSize(), sha));
         m1d1::Updater u;
         u.check (false);
         auto s = waitUpdater (u, { State::idle, State::checking });
         CHECK (s.state == State::available && s.latest == "9.9.9");
         u.check (true);
-        juce::Thread::sleep (50);
-        s = waitUpdater (u, { State::available, State::checking }, 3000);
-        s = u.getStatus();
-        CHECK (s.latest == "9.9.10");
+        s = waitUntil (u, [] (const Status& x) { return x.latest == "9.9.10" && x.state == State::available; });
+        CHECK (s.latest == "9.9.10" && s.state == State::available);
         // skipping a version is remembered
         u.skip();
         CHECK (u.getStatus().skipped);
-        // the download is version 9.9.9, not 9.9.10: it is refused
+        // the download is version 9.9.9, not 9.9.10: it is refused, and its files are removed
         u.download();
         s = waitUpdater (u, { State::available, State::downloading });
-        CHECK (s.state == State::failed && s.message.contains ("holds M1D1 9.9.9"));
+        CHECK (s.state == State::failed && s.downloadFailed && s.message.contains ("holds M1D1 9.9.9"));
+        CHECK (! juce::File (s.folder).exists());
+        // a window opened now (a due check) leaves the failure on screen
+        u.check (false);
+        juce::Thread::sleep (300);
+        CHECK (u.getStatus().state == State::failed && u.getStatus().message.contains ("holds M1D1"));
+        // Try again downloads again (and fails the same way here)
+        const auto before = u.getStatus().folder;
+        u.download();
+        s = waitUntil (u, [&] (const Status& x) { return x.state == State::failed && x.folder != before; });
+        CHECK (s.state == State::failed && s.downloadFailed && s.folder != before);
     }
     {
         m1d1::Updater u;   // a new window: the skip is still there
@@ -1854,27 +1881,77 @@ static void updaterTests()
         juce::Thread::sleep (200);
         CHECK (u.getStatus().state == State::idle);
         u.setAutoCheck (true);
+        // the choices are merged into the file, not overwritten: both are there
+        const auto saved = juce::JSON::parse (m1d1::Updater::settingsFolder().getChildFile ("updates.json"));
+        CHECK (saved["skip"].toString() == "9.9.10" && (bool) saved["auto"] && saved["release"]["version"].toString() == "9.9.10");
     }
     {
         // a damaged download (its checksum does not match) is never unpacked
-        api.replaceWithText (releaseJson ("v9.9.9", juce::URL (zip).toString (false), zip.getSize(), juce::String::repeatedString ("0", 64)));
+        api.replaceWithText (releaseJson ("v9.9.9", zipUrl, zip.getSize(), juce::String::repeatedString ("0", 64)));
         m1d1::Updater u;
         u.check (true);
-        auto s = waitUpdater (u, { State::idle, State::checking });
+        auto s = waitUntil (u, [] (const Status& x) { return x.latest == "9.9.9" && x.state == State::available; });
         CHECK (s.state == State::available);
         u.download();
         s = waitUpdater (u, { State::available, State::downloading });
         CHECK (s.state == State::failed && s.message.contains ("checksum"));
-        CHECK (! juce::File (s.folder).getChildFile ("unpacked").exists());
+        CHECK (! juce::File (s.folder).exists());
         // a short download is refused too
-        api.replaceWithText (releaseJson ("v9.9.9", juce::URL (zip).toString (false), zip.getSize() + 100, {}));
+        api.replaceWithText (releaseJson ("v9.9.9", zipUrl, zip.getSize() + 100, {}));
         u.check (true);
-        s = waitUpdater (u, { State::failed, State::checking }, 3000);
-        s = waitUpdater (u, { State::idle, State::checking });
+        s = waitUntil (u, [&] (const Status& x) { return x.state == State::available && x.size == zip.getSize() + 100; });
         u.download();
         s = waitUpdater (u, { State::available, State::downloading });
         CHECK (s.state == State::failed && s.message.contains ("stopped before the end"));
     }
+    {
+        // only this project's GitHub releases are downloaded
+        api.replaceWithText (releaseJson ("v9.9.9", "https://evil.example/M1D1-Windows.zip", zip.getSize(), {}));
+        m1d1::Updater u;
+        u.check (true);
+        auto s = waitUntil (u, [] (const Status& x) { return x.state == State::available && x.latest == "9.9.9"; });
+        CHECK (s.state == State::available);   // allowed only while a test release is used
+        setEnv ("M1D1_UPDATE_API", {});
+        u.download();
+        s = waitUpdater (u, { State::available, State::downloading });
+        CHECK (s.state == State::failed && s.message.contains ("not on M1D1's GitHub page"));
+    }
+    {
+        // the kept answer, read without a test release: a download elsewhere is never offered
+        auto keep = [&] (const juce::String& url)
+        {
+            auto* r = new juce::DynamicObject();
+            r->setProperty ("version", "9.9.9"); r->setProperty ("name", "M1D1 9.9.9"); r->setProperty ("zipUrl", url); r->setProperty ("zipSize", 10);
+            auto* o = new juce::DynamicObject();
+            o->setProperty ("lastCheck", juce::Time::currentTimeMillis()); o->setProperty ("auto", true); o->setProperty ("release", juce::var (r));
+            m1d1::Updater::settingsFolder().getChildFile ("updates.json").replaceWithText (juce::JSON::toString (juce::var (o)));
+            m1d1::Updater u;
+            u.check (false);
+            return waitUpdater (u, { State::idle, State::checking });
+        };
+        auto s = keep ("https://evil.example/M1D1-Windows.zip");
+        CHECK (s.state == State::upToDate && s.message.contains ("no Windows download"));
+        s = keep ("https://github.com/someone-else/Wingman/releases/download/v9.9.9/M1D1-Windows.zip");
+        CHECK (s.state == State::upToDate);
+        s = keep ("https://github.com/AhmedMasum2000000/Wingman/releases/download/v9.9.9/M1D1-Windows.zip");
+        CHECK (s.state == State::available);
+       #if JUCE_WINDOWS
+        // an "M1D1 update" window still waits for this version (it holds waiting.lock): M1D1 says so and never downloads
+        // over it, even after every M1D1 was closed and opened again
+        const auto pending = m1d1::Updater::downloadsFolder().getChildFile ("9.9.9-123");
+        pending.createDirectory();
+        folders.add (pending.getFullPathName());
+        {
+            auto held = std::make_unique<juce::FileOutputStream> (pending.getChildFile ("waiting.lock"));
+            CHECK (m1d1::Updater::findPending ("9.9.9") == pending);
+            s = keep ("https://github.com/AhmedMasum2000000/Wingman/releases/download/v9.9.9/M1D1-Windows.zip");
+            CHECK (s.state == State::ready && s.launched && s.folder == pending.getFullPathName());
+        }
+        // the window closed without installing: the update is offered again, with what happened
+        CHECK (m1d1::Updater::findPending ("9.9.9") == juce::File());
+       #endif
+    }
+    setEnv ("M1D1_UPDATE_API", juce::URL (api).toString (false));
     {
         // no release at all yet, and the current version: up to date
         api.deleteFile();
@@ -1882,13 +1959,12 @@ static void updaterTests()
         u.check (true);
         auto s = waitUpdater (u, { State::idle, State::checking });
         CHECK (s.state == State::upToDate);
-        api.replaceWithText (releaseJson ("v" + m1d1::Updater::currentVersion(), juce::URL (zip).toString (false), zip.getSize(), {}));
+        api.replaceWithText (releaseJson ("v" + m1d1::Updater::currentVersion(), zipUrl, zip.getSize(), {}));
         u.check (true);
-        juce::Thread::sleep (50);
-        s = waitUpdater (u, { State::upToDate, State::checking }, 1000);
-        s = u.getStatus();
+        s = waitUntil (u, [] (const Status& x) { return x.latest == m1d1::Updater::currentVersion(); });
         CHECK (s.state == State::upToDate && s.latest == m1d1::Updater::currentVersion());
     }
+    for (const auto& f : folders) juce::File (f).deleteRecursively();
     setEnv ("M1D1_UPDATE_API", {});
     setEnv ("M1D1_UPDATE_DIR", {});
     setEnv ("M1D1_UPDATE_NO_LAUNCH", {});

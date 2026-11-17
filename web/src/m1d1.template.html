@@ -473,6 +473,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
 .verbtn.new { color: var(--hot); border-color: rgba(253,61,0,.55); box-shadow: 0 0 10px rgba(253,61,0,.18); }
 .verbtn.new .led { display: inline-block; }
 .dialog p.upnotes { max-height: 120px; overflow: auto; padding: 10px 12px; background: #0c0c0c; box-shadow: inset 0 0 0 1px #222; font-size: 12.5px; line-height: 1.55; white-space: pre-line; }
+#ovUpdate .row { flex-wrap: wrap; }
 .upbar { height: 6px; background: #0c0c0c; box-shadow: inset 0 0 0 1px #222; }
 .upbar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #e23600, var(--hot)); box-shadow: 0 0 8px rgba(253,61,0,.6); transition: width .3s; }
 .chk { display: flex; gap: 9px; align-items: center; font: 400 13px/1.3 var(--f-ui); color: var(--text); }
@@ -1544,8 +1545,10 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   function closeDialogs() { const open = $$('.overlay').some(o => !o.hidden); $$('.overlay').forEach(o => { o.hidden = true; }); if (open && opener && opener.focus) opener.focus(); }
   addEventListener('keydown', e => {
     const ov = $$('.overlay').find(o => !o.hidden); if (!ov || e.key !== 'Tab') return;
-    const f = [...ov.querySelectorAll('button')], i = f.indexOf(document.activeElement);
-    e.preventDefault(); f[(i + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
+    const f = [...ov.querySelectorAll('button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])')].filter(el => !el.disabled && el.getClientRects().length > 0);
+    if (!f.length) return;
+    const n = f.length, i = f.indexOf(document.activeElement);
+    e.preventDefault(); f[i < 0 ? (e.shiftKey ? n - 1 : 0) : (i + (e.shiftKey ? -1 : 1) + n) % n].focus();
   });
   $('#btnReset').addEventListener('click', () => openDialog($('#ovReset'), $('#resetNo')));
   $('#resetNo').addEventListener('click', closeDialogs);
@@ -2101,43 +2104,55 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     hostCall = call; hostB64 = b64;
     // Updates: the version next to the logo turns into "Update" when a new M1D1 is out. The dialog downloads it,
     // the plugin checks it, and it installs when FL Studio is closed. The plugin sends its state as 'update' events.
-    let upS = null, upLast = '';
+    let upS = null;
     const upPct = s => Math.round(100 * (s.progress || 0));
     const upShow = s => {
       if (!s || !s.current) return;
       upS = s;
-      const fresh = (s.state === 'available' && !s.skipped) || s.state === 'downloading' || s.state === 'ready';
+      const failedDl = s.state === 'failed' && s.downloadFailed;
+      const fresh = (s.state === 'available' && !s.skipped) || s.state === 'downloading' || s.state === 'ready' || failedDl;
       const vb = $('#btnVer'), led = $('#verLed');
       vb.hidden = false; vb.classList.toggle('new', fresh);
       led.classList.toggle('on', fresh); led.classList.toggle('busy', s.state === 'downloading');
-      $('#verTxt').textContent = s.state === 'ready' ? 'Update ready' : s.state === 'downloading' ? `Updating ${upPct(s)}%` : fresh ? `Update ${s.latest}` : `v${s.current}`;
-      vb.title = fresh ? `M1D1 ${s.latest} is out (you have ${s.current}). Click to update.` : `M1D1 ${s.current}. Click to look for a new version.`;
+      $('#verTxt').textContent = s.state === 'ready' ? (s.installed ? 'Update installed' : 'Update ready') : s.state === 'downloading' ? `Updating ${upPct(s)}%`
+        : failedDl ? 'Update failed' : fresh ? `Update ${s.latest}` : `v${s.current}`;
+      vb.title = s.state === 'ready' ? `M1D1 ${s.latest} is ${s.installed ? 'installed' : 'ready to install'}. Click for details.`
+        : failedDl ? `The download of M1D1 ${s.latest} failed. Click to try again.`
+        : fresh ? `M1D1 ${s.latest} is out (you have ${s.current}). Click to update.` : `M1D1 ${s.current}. Click to look for a new version.`;
       vb.setAttribute('aria-label', vb.title);
       const mb = s.size > 0 ? ` The download is ${(s.size / 1048576).toFixed(1)} MB.` : '';
+      const closeWhat = s.standalone ? 'Close this M1D1 app (and any program that has M1D1 open)' : 'Close FL Studio (and any other program that has M1D1 open, such as the M1D1 app)';
+      const useIt = s.standalone ? 'Start M1D1 again to use it.' : 'Open your project again to use it.';
       $('#upMsg').textContent = ({
         idle: `You have M1D1 ${s.current}.`,
         checking: 'Looking for a new version on GitHub...',
         upToDate: s.message || `M1D1 ${s.current} is the latest version.`,
-        available: `M1D1 ${s.latest} is out. You have ${s.current}.${mb}` + (s.skipped ? ' You chose to skip this version.' : ''),
+        available: (s.message ? s.message + ' ' : '') + `M1D1 ${s.latest} is out. You have ${s.current}.${mb}` + (s.skipped ? ' You chose to skip this version.' : ''),
         downloading: `Downloading M1D1 ${s.latest}... ${upPct(s)}%`,
-        ready: `M1D1 ${s.latest} is downloaded and checked. Close FL Studio: it installs then, and Windows asks for permission once. A window called "M1D1 update" shows how it goes. The next time you open your project, it is the new version.`,
+        ready: s.installed ? `M1D1 ${s.latest} is installed. ${useIt}`
+          : s.launched ? `M1D1 ${s.latest} is downloaded and checked. ${closeWhat}: it installs then, and Windows asks for permission once. A window called "M1D1 update" shows how it goes. ${useIt.replace('to use it', 'afterwards to use the new version')}`
+          : `M1D1 ${s.latest} is downloaded and checked, in ${s.folder || 'your temporary folder'}. Run Install.bat in its M1D1 folder to install it.`,
         failed: s.message || 'Something went wrong. Try again.' })[s.state] || '';
-      const notes = ['available', 'downloading', 'ready'].includes(s.state) ? s.notes : '';
+      const notes = ['available', 'downloading', 'ready'].includes(s.state) && !s.installed ? s.notes : '';
       $('#upNotes').hidden = !notes; $('#upNotes').textContent = notes || '';
       $('#upBar').hidden = s.state !== 'downloading'; $('#upFill').style.width = `${upPct(s)}%`;
       $('#upAuto').checked = !!s.autoCheck;
-      $('#upPage').hidden = !(s.hasPage && ['available', 'downloading', 'ready'].includes(s.state));
+      $('#upPage').hidden = !(s.hasPage && (['available', 'downloading', 'ready'].includes(s.state) || failedDl));
       $('#upSkip').hidden = !(s.state === 'available' && !s.skipped);
-      const go = $('#upGo'), retryDownload = s.state === 'failed' && upLast === 'download', hadFocus = document.activeElement === go;
+      const go = $('#upGo'), hadFocus = document.activeElement === go;
       go.textContent = ({ available: 'Update now', downloading: 'Downloading...', checking: 'Checking...', failed: 'Try again' })[s.state] || 'Check now';
       go.hidden = s.state === 'ready'; go.disabled = s.state === 'checking' || s.state === 'downloading';
-      go.dataset.act = s.state === 'available' || retryDownload ? 'download' : 'check';
+      go.dataset.act = s.state === 'available' || failedDl ? 'download' : 'check';
       if (hadFocus && (go.hidden || go.disabled)) $('#upClose').focus();   // keep the keyboard in the dialog
     };
     call('updateStatus').then(upShow);
     be.addEventListener('update', upShow);
-    $('#btnVer').addEventListener('click', () => { openDialog($('#ovUpdate'), $('#upGo').hidden || $('#upGo').disabled ? $('#upClose') : $('#upGo')); call('updateStatus').then(upShow); });
-    $('#upGo').addEventListener('click', () => { const act = $('#upGo').dataset.act; upLast = act; call(act === 'download' ? 'updateDownload' : 'updateCheck', true); });
+    $('#btnVer').addEventListener('click', () => {
+      openDialog($('#ovUpdate'), $('#upGo').hidden || $('#upGo').disabled ? $('#upClose') : $('#upGo'));
+      // the latest state (an 'update' event may have been missed while the window was hidden), and a check if one is due
+      call('updateStatus').then(upShow); call('updateCheck', false);
+    });
+    $('#upGo').addEventListener('click', () => call($('#upGo').dataset.act === 'download' ? 'updateDownload' : 'updateCheck', true));
     $('#upSkip').addEventListener('click', () => call('updateSkip'));
     $('#upPage').addEventListener('click', () => call('updateOpenPage'));
     $('#upClose').addEventListener('click', closeDialogs);

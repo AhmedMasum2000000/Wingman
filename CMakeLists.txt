@@ -9,6 +9,18 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>") # no VC+
 
 option(BACKLINE_BUILD_PLUGIN "Build the JUCE plugin (downloads JUCE)" ON)
 
+# The version M1D1 reports (its update check compares it with the latest release). A release build passes its full tag,
+# for example -DM1D1_VERSION_STRING=0.5.0-beta.1; it must match project(... VERSION) above, so the plugin, the app and
+# the update check agree and a published update never offers itself again.
+if(NOT M1D1_VERSION_STRING)
+    set(M1D1_VERSION_STRING "${PROJECT_VERSION}")
+endif()
+string(REGEX REPLACE "[-+].*$" "" M1D1_VERSION_BASE "${M1D1_VERSION_STRING}")
+if(NOT M1D1_VERSION_BASE VERSION_EQUAL PROJECT_VERSION)
+    message(FATAL_ERROR "The release version ${M1D1_VERSION_STRING} does not match project(Backline VERSION ${PROJECT_VERSION}) "
+                        "in CMakeLists.txt. Set the project version to ${M1D1_VERSION_BASE} first and push, then build the release.")
+endif()
+
 add_library(backline_core STATIC
     core/Analysis.cpp core/Harmony.cpp core/Parts.cpp core/MidiFile.cpp
     core/Timing.cpp core/Variation.cpp core/Patterns.cpp)
@@ -67,7 +79,7 @@ if(BACKLINE_BUILD_PLUGIN)
     target_sources(Backline PRIVATE plugin/PluginProcessor.cpp plugin/PluginEditor.cpp plugin/Instruments.cpp
         plugin/WebEngine.cpp plugin/WebEditor.cpp plugin/Updater.cpp)
     target_compile_definitions(Backline PUBLIC
-        M1D1_VERSION="${PROJECT_VERSION}"
+        M1D1_VERSION="${M1D1_VERSION_STRING}"
         M1D1_WEB_UI=1 JUCE_WEB_BROWSER=1 JUCE_USE_WIN_WEBVIEW2_WITH_STATIC_LINKING=1
         JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0
         JUCE_DISPLAY_SPLASH_SCREEN=0)
@@ -83,14 +95,14 @@ if(BACKLINE_BUILD_PLUGIN)
         tests/PluginTests.cpp plugin/PluginProcessor.cpp plugin/PluginEditor.cpp plugin/Instruments.cpp plugin/WebEngine.cpp
         plugin/Updater.cpp)
     target_compile_definitions(backline_plugin_tests PRIVATE
-        M1D1_VERSION="${PROJECT_VERSION}" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
+        M1D1_VERSION="${M1D1_VERSION_STRING}" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
     target_link_libraries(backline_plugin_tests PRIVATE backline_core BacklineAssets juce::juce_audio_utils juce::juce_cryptography)
     add_test(NAME plugin COMMAND backline_plugin_tests)
 
     # M1D1's updater from the command line, for the build's end-to-end test (check, download, verify, install)
     juce_add_console_app(m1d1_update_tool)
     target_sources(m1d1_update_tool PRIVATE tests/UpdateTool.cpp plugin/Updater.cpp)
-    target_compile_definitions(m1d1_update_tool PRIVATE M1D1_VERSION="${PROJECT_VERSION}" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_compile_definitions(m1d1_update_tool PRIVATE M1D1_VERSION="${M1D1_VERSION_STRING}" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
     target_link_libraries(m1d1_update_tool PRIVATE juce::juce_events juce::juce_cryptography
         PUBLIC juce::juce_recommended_config_flags)
 

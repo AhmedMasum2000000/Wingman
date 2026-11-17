@@ -42,8 +42,11 @@ SHA-256 checksum and its contents, and opens a small "M1D1 update" window. Close
 version with the package's own `Install.bat` (Windows asks for permission once). Pre-releases are never offered.
 Automatic checks can be turned off in the same dialog.
 
-To publish an update: Actions > Build > Run workflow, with a version (for example `0.4.3`), the beta box unticked and
-a sentence for "What's new". Every M1D1 from 0.4.2 on will offer it.
+To publish an update: set `project(Backline VERSION 0.4.3)` in `CMakeLists.txt` and push, then Actions > Build >
+Run workflow with the same version (`0.4.3`), the beta box unticked and a sentence for "What's new". The build stops if
+the two versions differ, so a published update never offers itself again. Every M1D1 from 0.4.2 on will offer it.
+The build tests the whole update on Windows (download, checks, install) as an administrator; users see one Windows
+permission prompt instead.
 
 ## Using it
 

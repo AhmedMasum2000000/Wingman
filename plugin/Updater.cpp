@@ -17,30 +17,6 @@ namespace
     bool allowedDownload (const juce::String& url) { return testApi().isNotEmpty() || url.startsWith (repoReleases + juce::String ("download/")); }
     bool allowedPage (const juce::String& url) { return testApi().isNotEmpty() || url.startsWith (repoReleases); }
 
-    struct Fetched { int status = 0; std::unique_ptr<juce::InputStream> stream; };
-
-    Fetched fetchUrl (const juce::String& address, int timeoutMs, bool api)
-    {
-        Fetched f;
-        const juce::URL url (address);
-        if (url.isLocalFile())
-        {
-            const auto file = url.getLocalFile();
-            f.status = file.existsAsFile() ? 200 : 404;
-            if (f.status == 200) f.stream = file.createInputStream();
-            return f;
-        }
-        juce::String headers = "User-Agent: M1D1/" + Updater::currentVersion() + "\r\n";
-        if (api) headers << "Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n";
-        f.stream = url.createInputStream (juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
-                                              .withExtraHeaders (headers)
-                                              .withConnectionTimeoutMs (timeoutMs)
-                                              .withNumRedirectsToFollow (8)
-                                              .withStatusCode (&f.status));
-        if (f.stream == nullptr && f.status == 200) f.status = 0;
-        return f;
-    }
-
     juce::String plainNotes (juce::String body)
     {
         body = body.replace ("\r\n", "\n");
@@ -62,7 +38,25 @@ namespace
         return text;
     }
 
-    [[maybe_unused]] juce::String quoted (const juce::String& s) { return "'" + s.replace ("'", "''") + "'"; }   // a PowerShell string
+    // a version as it may appear in a folder name and in the update script: digits, letters, dots, + and -
+    bool plainVersion (const juce::String& v)
+    {
+        return v.isNotEmpty() && v.length() <= 40 && juce::CharacterFunctions::isDigit (v[0])
+            && v.containsOnly ("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.+-");
+    }
+
+    // The "M1D1 update" window keeps waiting.lock open with no sharing: on Windows the file cannot be deleted then.
+    // A lock nobody holds is deleted here (it is left from a window that ended).
+    bool heldOpen (const juce::File& lockFile) { return lockFile.existsAsFile() && ! lockFile.deleteFile(); }
+
+    juce::var releaseVar (const Release& r)
+    {
+        auto* o = new juce::DynamicObject();
+        o->setProperty ("version", r.version); o->setProperty ("name", r.name); o->setProperty ("notes", r.notes);
+        o->setProperty ("page", r.page); o->setProperty ("zipUrl", r.zipUrl); o->setProperty ("sha256", r.sha256);
+        o->setProperty ("zipSize", r.zipSize);
+        return juce::var (o);
+    }
 }
 
 int compareVersions (const juce::String& a, const juce::String& b)
@@ -108,7 +102,7 @@ std::optional<Release> parseRelease (const juce::String& json)
     Release r;
     r.version = v["tag_name"].toString().trim();
     if (r.version.startsWithIgnoreCase ("v")) r.version = r.version.substring (1);
-    if (r.version.isEmpty() || ! juce::CharacterFunctions::isDigit (r.version[0])) return std::nullopt;
+    if (! plainVersion (r.version)) return std::nullopt;
     r.name = v["name"].toString().trim();
     if (r.name.isEmpty()) r.name = "M1D1 " + r.version;
     r.page = v["html_url"].toString();
@@ -164,10 +158,23 @@ juce::String unpackZip (const juce::File& zip, const juce::File& into)
 
 // ------------------------------------------------------------------------------------------------------------------
 
+namespace
+{
+    constexpr juce::int64 launchGraceMs = 30 * 1000;            // the window takes a moment to start and take its lock
+    constexpr juce::int64 staleMs = 6 * 60 * 60 * 1000;         // leftover download folders are removed after 6 hours
+}
+
+// Drops a due (not forced) check that came in while a download ran, so the download's result stays on screen.
+struct DropDueCheck
+{
+    Updater& u;
+    ~DropDueCheck() { int due = 1; u.wantCheck.compare_exchange_strong (due, 0); }
+};
+
 Updater::Updater() : juce::Thread ("M1D1 updates")
 {
     status.current = currentVersion();
-    loadSettings();
+    loadSettings (true);
     startThread (juce::Thread::Priority::low);
 }
 
@@ -175,8 +182,13 @@ Updater::~Updater()
 {
     removeAllChangeListeners();
     signalThreadShouldExit();
+    {
+        // a connection that hangs is closed now, so the thread ends at once instead of holding the DAW
+        const juce::ScopedLock sl (streamLock);
+        if (active != nullptr) active->cancel();
+    }
     notify();
-    stopThread (20000);
+    stopThread (10000);
 }
 
 juce::String Updater::currentVersion()
@@ -208,8 +220,25 @@ const char* Updater::stateName (State s)
 juce::File Updater::settingsFolder()
 {
     const auto custom = juce::SystemStats::getEnvironmentVariable ("M1D1_UPDATE_DIR", {});
-    return custom.isNotEmpty() ? juce::File (custom)
-                               : juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("M1D1");
+    if (custom.isNotEmpty()) return juce::File (custom);
+    // answers from a test release are never kept where the real M1D1 reads them
+    if (testApi().isNotEmpty()) return juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("M1D1UpdateTest");
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("M1D1");
+}
+
+juce::File Updater::downloadsFolder()
+{
+    return juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("M1D1Update");
+}
+
+juce::File Updater::findPending (const juce::String& version)
+{
+    if (! plainVersion (version)) return {};
+    for (const auto& d : downloadsFolder().findChildFiles (juce::File::findDirectories, false, version + "-*"))
+        if (d.getFileName().fromFirstOccurrenceOf (version + "-", false, false).containsOnly ("0123456789")
+            && heldOpen (d.getChildFile ("waiting.lock")))
+            return d;
+    return {};
 }
 
 void Updater::check (bool force)
@@ -227,13 +256,14 @@ void Updater::download()
 
 void Updater::skip()
 {
+    juce::String v;
     {
         const juce::ScopedLock sl (lock);
         if (status.latest.isEmpty()) return;
-        skipVersion = status.latest;
+        v = skipVersion = status.latest;
         status.skipped = true;
     }
-    saveSettings();
+    writeSettings ([&] (juce::DynamicObject& o) { o.setProperty ("skip", v); });
     sendChangeMessage();
 }
 
@@ -243,7 +273,7 @@ void Updater::setAutoCheck (bool on)
         const juce::ScopedLock sl (lock);
         status.autoCheck = on;
     }
-    saveSettings();
+    writeSettings ([&] (juce::DynamicObject& o) { o.setProperty ("auto", on); });
     sendChangeMessage();
 }
 
@@ -260,6 +290,37 @@ void Updater::setState (State s, const juce::String& message)
         status.state = s;
         status.message = message;
         if (s != State::downloading) status.progress = s == State::ready ? 1.0 : 0.0;
+        if (s != State::failed) status.downloadFailed = false;
+        if (s != State::ready) { status.launched = false; status.installed = false; }
+    }
+    sendChangeMessage();
+}
+
+void Updater::setReady (const juce::File& folder, bool launched)
+{
+    {
+        const juce::ScopedLock sl (lock);
+        status.state = State::ready;
+        status.message = {};
+        status.progress = 1.0;
+        status.downloadFailed = false;
+        status.installed = false;
+        status.launched = launched;
+        status.folder = folder.getFullPathName();
+    }
+    sendChangeMessage();
+}
+
+void Updater::failDownload (const juce::String& message, const juce::File& folder)
+{
+    if (folder != juce::File() && ! heldOpen (folder.getChildFile ("waiting.lock"))) folder.deleteRecursively();
+    {
+        const juce::ScopedLock sl (lock);
+        status.state = State::failed;
+        status.message = message;
+        status.progress = 0.0;
+        status.downloadFailed = true;
+        status.launched = status.installed = false;
     }
     sendChangeMessage();
 }
@@ -274,7 +335,44 @@ void Updater::run()
     }
 }
 
-void Updater::evaluate (const Release& r)
+juce::InputStream* Updater::openStream (const juce::String& address, int timeoutMs, bool api, int& httpStatus)
+{
+    httpStatus = 0;
+    const juce::URL url (address);
+    if (url.isLocalFile())
+    {
+        const auto file = url.getLocalFile();
+        httpStatus = file.existsAsFile() ? 200 : 404;
+        if (httpStatus != 200) return nullptr;
+        const juce::ScopedLock sl (streamLock);
+        current = file.createInputStream();
+        return current.get();
+    }
+    juce::String headers = "User-Agent: M1D1/" + currentVersion() + "\r\n";
+    if (api) headers << "Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n";
+    auto web = std::make_unique<juce::WebInputStream> (url, false);
+    web->withExtraHeaders (headers).withConnectionTimeout (timeoutMs).withNumRedirectsToFollow (8);
+    auto* w = web.get();
+    {
+        const juce::ScopedLock sl (streamLock);
+        if (threadShouldExit()) return nullptr;
+        current = std::move (web);
+        active = w;
+    }
+    const bool connected = w->connect (nullptr);
+    httpStatus = connected ? w->getStatusCode() : 0;
+    if (! connected || threadShouldExit()) { streamDone(); return nullptr; }
+    return w;
+}
+
+void Updater::streamDone()
+{
+    const juce::ScopedLock sl (streamLock);
+    active = nullptr;
+    current.reset();
+}
+
+void Updater::evaluate (const Release& r, const juce::String& message)
 {
     const bool newer = compareVersions (currentVersion(), r.version) < 0;
     const bool downloadable = r.zipUrl.isNotEmpty() && allowedDownload (r.zipUrl);
@@ -287,22 +385,71 @@ void Updater::evaluate (const Release& r)
         status.size = r.zipSize;
         status.skipped = r.version == skipVersion;
     }
-    if (newer && downloadable) setState (State::available);
+    if (newer && downloadable)
+    {
+        // an "M1D1 update" window for this version is still waiting (from an M1D1 that was closed since): ready
+        if (const auto pending = findPending (r.version); pending != juce::File())
+        {
+            setReady (pending, true);
+            return;
+        }
+        setState (State::available, message);
+    }
     else if (newer) setState (State::upToDate, "M1D1 " + r.version + " is out, but it has no Windows download yet.");
     else setState (State::upToDate);
 }
 
-void Updater::runCheck (bool force)
+void Updater::revalidateReady()
 {
-    std::optional<Release> kept;
-    juce::int64 last = 0;
+    juce::String version, folder;
     {
         const juce::ScopedLock sl (lock);
-        if (status.state == State::downloading || status.state == State::ready || status.state == State::checking) return;
-        if (! force && ! status.autoCheck) return;
-        kept = release;
-        last = lastCheck;
+        version = status.latest;
+        folder = status.folder;
     }
+    if (juce::Time::currentTimeMillis() - launchedAt < launchGraceMs) return;   // the window is still starting
+    if (folder.isNotEmpty() && heldOpen (juce::File (folder).getChildFile ("waiting.lock"))) return;   // still waiting
+   #if JUCE_WINDOWS
+    const auto installed = juce::File::getSpecialLocation (juce::File::globalApplicationsDirectory)
+                               .getChildFile ("M1D1").getChildFile ("version.txt").loadFileAsString().trim();
+   #else
+    const juce::String installed;
+   #endif
+    if (version.isNotEmpty() && installed == version)
+    {
+        {
+            const juce::ScopedLock sl (lock);
+            status.installed = true;
+        }
+        sendChangeMessage();
+        return;
+    }
+    std::optional<Release> r;
+    {
+        const juce::ScopedLock sl (lock);
+        r = release;
+        status.folder = {};
+    }
+    if (r) evaluate (*r, "The \"M1D1 update\" window closed before M1D1 " + version + " was installed. Click Update now to try again.");
+}
+
+void Updater::runCheck (bool force)
+{
+    loadSettings (false);   // the user's choices, as another M1D1 may have changed them
+    State st;
+    std::optional<Release> kept;
+    juce::int64 last = 0;
+    bool autoOn = true, downloadFailed = false, launched = false;
+    {
+        const juce::ScopedLock sl (lock);
+        st = status.state; kept = release; last = lastCheck; autoOn = status.autoCheck;
+        downloadFailed = status.downloadFailed; launched = status.launched;
+    }
+    if (st == State::downloading || st == State::checking) return;
+    if (st == State::ready) { if (launched) revalidateReady(); return; }
+    if (! force && ! autoOn) return;
+    if (! force && st == State::failed && downloadFailed) return;   // keep the download's failure until the user acts
+
     const auto now = juce::Time::currentTimeMillis();
     if (! force && last > 0 && now - last >= 0 && now - last < recheckMs)
     {
@@ -313,77 +460,102 @@ void Updater::runCheck (bool force)
 
     setState (State::checking);
     const auto api = testApi().isNotEmpty() ? testApi() : juce::String (latestApi);
-    auto f = fetchUrl (api, 10000, true);
-    const auto text = f.stream != nullptr ? f.stream->readEntireStreamAsString() : juce::String();
+    int code = 0;
+    juce::String text;
+    if (auto* in = openStream (api, 10000, true, code))
+        text = in->readEntireStreamAsString();
+    streamDone();
     if (threadShouldExit()) return;
 
-    if (f.status == 200 || f.status == 404)
+    if (code == 200 || code == 404)
     {
         // 404: no full release yet
-        const auto r = f.status == 200 ? parseRelease (text) : std::nullopt;
+        const auto r = code == 200 ? parseRelease (text) : std::nullopt;
         {
             const juce::ScopedLock sl (lock);
             lastCheck = now;
             release = r;
         }
-        saveSettings();
+        writeSettings ([&] (juce::DynamicObject& o)
+        {
+            o.setProperty ("lastCheck", now);
+            o.setProperty ("release", r ? releaseVar (*r) : juce::var());
+        });
         if (r) evaluate (*r);
         else setState (State::upToDate);
     }
-    else if (f.status == 403 || f.status == 429)
+    else if (code == 403 || code == 429)
         setState (State::failed, "GitHub is busy right now. M1D1 asks again later.");
-    else if (f.status == 0)
+    else if (code == 0)
         setState (State::failed, "No connection to GitHub. Check your internet and try again.");
     else
-        setState (State::failed, "GitHub answered with an error (HTTP " + juce::String (f.status) + "). Try again later.");
+        setState (State::failed, "GitHub answered with an error (HTTP " + juce::String (code) + "). Try again later.");
 }
 
 void Updater::runDownload()
 {
+    const DropDueCheck dropDue { *this };
     std::optional<Release> r;
     {
         const juce::ScopedLock sl (lock);
         // available, or a download that failed and is tried again
-        const bool canTry = status.state == State::available || (status.state == State::failed && status.folder.isNotEmpty());
-        if (! canTry || ! release || release->zipUrl.isEmpty() || compareVersions (currentVersion(), release->version) >= 0) return;
-        r = release;
+        const bool canTry = status.state == State::available || (status.state == State::failed && status.downloadFailed);
+        if (canTry && release && release->zipUrl.isNotEmpty() && compareVersions (currentVersion(), release->version) < 0)
+            r = release;
     }
-    if (! allowedDownload (r->zipUrl)) { setState (State::failed, "The download is not on M1D1's GitHub page. It was not installed."); return; }
+    if (! r) { sendChangeMessage(); return; }   // nothing to download: the page still gets an answer
+    if (! allowedDownload (r->zipUrl)) { failDownload ("The download is not on M1D1's GitHub page. It was not installed.", {}); return; }
 
-    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("M1D1Update").getChildFile (r->version);
-    folder.deleteRecursively();
-    if (! folder.createDirectory()) { setState (State::failed, "M1D1 cannot write to " + folder.getFullPathName() + "."); return; }
-    const auto zip = folder.getChildFile ("M1D1-Windows.zip");
+    // an "M1D1 update" window for this version still waits: never download it again over its files
+    if (const auto pending = findPending (r->version); pending != juce::File())
+    {
+        setReady (pending, true);
+        return;
+    }
+    // folders left from earlier downloads whose window ended
+    for (const auto& d : downloadsFolder().findChildFiles (juce::File::findDirectories, false))
+        if (! heldOpen (d.getChildFile ("waiting.lock"))
+            && juce::Time::currentTimeMillis() - d.getLastModificationTime().toMilliseconds() > staleMs)
+            d.deleteRecursively();
 
+    auto stamp = juce::Time::currentTimeMillis();
+    while (downloadsFolder().getChildFile (r->version + "-" + juce::String (stamp)).exists()) ++stamp;   // a folder per download
+    const auto folder = downloadsFolder().getChildFile (r->version + "-" + juce::String (stamp));
     {
         const juce::ScopedLock sl (lock);
         status.progress = 0.0;
         status.folder = folder.getFullPathName();
     }
+    if (! folder.createDirectory()) { failDownload ("M1D1 cannot write to " + folder.getFullPathName() + ".", {}); return; }
+    const auto zip = folder.getChildFile ("M1D1-Windows.zip");
     setState (State::downloading);
 
-    auto f = fetchUrl (r->zipUrl, 15000, false);
-    if (f.stream == nullptr || f.status != 200)
+    int code = 0;
+    auto* in = openStream (r->zipUrl, 15000, false, code);
+    if (in == nullptr || code != 200)
     {
-        setState (State::failed, f.status == 0 ? "Could not start the download. Check your internet and try again."
-                                               : "The download answered with an error (HTTP " + juce::String (f.status) + "). Try again later.");
+        streamDone();
+        if (threadShouldExit()) return;
+        failDownload (code == 0 ? "Could not start the download. Check your internet and try again."
+                                : "The download answered with an error (HTTP " + juce::String (code) + "). Try again later.", folder);
         return;
     }
-    const auto total = r->zipSize > 0 ? r->zipSize : f.stream->getTotalLength();
+    const auto total = r->zipSize > 0 ? r->zipSize : in->getTotalLength();
     juce::int64 written = 0;
+    juce::String error;
     {
         juce::FileOutputStream out (zip);
-        if (! out.openedOk()) { setState (State::failed, "M1D1 cannot write the download to " + zip.getFullPathName() + "."); return; }
+        if (! out.openedOk()) error = "M1D1 cannot write the download to " + zip.getFullPathName() + ".";
         juce::HeapBlock<char> buffer (65536);
         double shown = 0.0;
-        for (;;)
+        while (error.isEmpty())
         {
-            if (threadShouldExit()) { out.flush(); zip.deleteFile(); return; }
-            const int n = f.stream->read (buffer, 65536);
+            if (threadShouldExit()) break;
+            const int n = in->read (buffer, 65536);
             if (n <= 0) break;
-            if (! out.write (buffer, (size_t) n)) { setState (State::failed, "The disk is full or not writable. The update was not installed."); return; }
+            if (! out.write (buffer, (size_t) n)) { error = "The disk is full or not writable. The update was not installed."; break; }
             written += n;
-            if (written > maxDownload) { setState (State::failed, "The download is far bigger than M1D1. It was not installed."); return; }
+            if (written > maxDownload) { error = "The download is far bigger than M1D1. It was not installed."; break; }
             const double p = total > 0 ? juce::jlimit (0.0, 1.0, (double) written / (double) total) : 0.0;
             if (p - shown >= 0.01)
             {
@@ -394,24 +566,31 @@ void Updater::runDownload()
         }
         out.flush();
     }
+    streamDone();
+    if (threadShouldExit()) { folder.deleteRecursively(); return; }
+    if (error.isNotEmpty()) { failDownload (error, folder); return; }
 
     if (r->zipSize > 0 && written != r->zipSize)
     {
-        setState (State::failed, "The download stopped before the end (" + juce::String (written) + " of " + juce::String (r->zipSize) + " bytes). Try again.");
+        failDownload ("The download stopped before the end (" + juce::String (written) + " of " + juce::String (r->zipSize) + " bytes). Try again.", folder);
         return;
     }
     if (r->sha256.isNotEmpty() && juce::SHA256 (zip).toHexString().toLowerCase() != r->sha256)
     {
-        setState (State::failed, "The download does not match its checksum on GitHub. It was not installed. Try again.");
+        failDownload ("The download does not match its checksum on GitHub. It was not installed. Try again.", folder);
         return;
     }
     const auto unpacked = folder.getChildFile ("unpacked");
-    if (auto e = unpackZip (zip, unpacked); e.isNotEmpty()) { setState (State::failed, e); return; }
-    if (auto e = checkPackage (unpacked, r->version); e.isNotEmpty()) { setState (State::failed, e); return; }
+    if (auto e = unpackZip (zip, unpacked); e.isNotEmpty()) { failDownload (e, folder); return; }
+    if (auto e = checkPackage (unpacked, r->version); e.isNotEmpty()) { failDownload (e, folder); return; }
 
-    const auto launched = launchInstaller (folder, r->version);
-    if (launched.isNotEmpty()) setState (State::failed, launched);
-    else setState (State::ready);
+    bool launched = false;
+    if (auto e = launchInstaller (folder, r->version); e.isNotEmpty()) { failDownload (e, {}); return; }
+   #if JUCE_WINDOWS
+    launched = juce::SystemStats::getEnvironmentVariable ("M1D1_UPDATE_NO_LAUNCH", {}) != "1";
+   #endif
+    if (launched) launchedAt = juce::Time::currentTimeMillis();
+    setReady (folder, launched);
 }
 
 juce::String Updater::launchInstaller (const juce::File& folder, const juce::String& version)
@@ -422,50 +601,71 @@ juce::String Updater::launchInstaller (const juce::File& folder, const juce::Str
     juce::String script = R"PS(# M1D1 update: installs the downloaded M1D1 once no program has it open.
 $ErrorActionPreference = 'Continue'
 try { $Host.UI.RawUI.WindowTitle = 'M1D1 update' } catch {}
-$folder = @FOLDER@
-$version = @VERSION@
+$folder = $PSScriptRoot
+$version = '@VERSION@'
+$test = $env:M1D1_UPDATE_API
+if ($test) { try { Start-Transcript -Path (Join-Path ([IO.Path]::GetTempPath()) 'M1D1-update-test.log') -Force | Out-Null } catch {} }
+# held open while this window lives: M1D1 sees that this update is waiting and never downloads over it
+try { $lock = [IO.File]::Open((Join-Path $folder 'waiting.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
+catch { Write-Host '  Another M1D1 update window is already waiting. This one closes.'; exit 0 }
 $installer = Join-Path $folder 'unpacked\M1D1\Install.bat'
 $plugin = Join-Path $env:CommonProgramFiles 'VST3\M1D1.vst3\Contents\x86_64-win\M1D1.vst3'
-$test = $env:M1D1_UPDATE_API
+$app = Join-Path $env:ProgramFiles 'M1D1\version.txt'
 function Busy {
   if (Get-Process -Name 'FL64', 'FL', 'FL Studio', 'M1D1' -ErrorAction SilentlyContinue) { return $true }
   if (Test-Path $plugin) {
-    # a program that has the plugin open keeps others from opening its file exclusively
     try { $f = [IO.File]::Open($plugin, 'Open', 'Read', 'None'); $f.Close() } catch [IO.IOException] { return $true } catch {}
+    # a DAW that has loaded M1D1 (Ableton Live, Reaper, Bitwig, Cubase, Studio One...)
+    foreach ($p in Get-Process) { try { foreach ($m in $p.Modules) { if ($m.FileName -ieq $plugin) { return $true } } } catch {} }
   }
   return $false
+}
+function Done($code) {
+  Write-Host "M1D1-UPDATE-EXIT $code"
+  if ($test) { try { Stop-Transcript | Out-Null } catch {} }
+  $lock.Close()
+  if ($code -eq 0) { Set-Location ([IO.Path]::GetTempPath()); Remove-Item -Recurse -Force $folder -ErrorAction SilentlyContinue }
+  exit $code
 }
 Write-Host ''
 Write-Host "  M1D1 $version is downloaded and checked."
 if (Busy) {
-  Write-Host '  Close FL Studio (and the M1D1 app). The update installs as soon as they are closed.'
-  Write-Host '  You can leave this window open.'
-  while (Busy) { Start-Sleep -Seconds 2 }
+  Write-Host '  Close FL Studio, the M1D1 app and any other program that has M1D1 open.'
+  Write-Host '  The update installs as soon as they are closed. You can leave this window open.'
+  while (Busy) { Start-Sleep -Seconds 3 }
+}
+# one install at a time, even with several M1D1 update windows
+$mutex = New-Object Threading.Mutex($false, 'Local\M1D1Update')
+try { [void]$mutex.WaitOne() } catch [Threading.AbandonedMutexException] {}
+if ((Test-Path $app) -and ((Get-Content $app -Raw).Trim() -eq $version)) {
+  Write-Host "  M1D1 $version is already installed."
+  Done 0
 }
 $admin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 while ($true) {
+  if (-not (Test-Path $installer)) { Write-Host '  The downloaded update is gone. Open M1D1 and update again.'; Done 1 }
   Write-Host '  Installing. Windows asks for permission...'
   $code = 1
   try {
     if ($admin) { & $installer elevated quiet; $code = $LASTEXITCODE }
     else { $p = Start-Process -FilePath $installer -ArgumentList 'elevated', 'quiet' -Verb RunAs -Wait -PassThru; $code = $p.ExitCode }
-  } catch { Write-Host '  Windows did not give permission.' }
+  } catch { Write-Host "  The installer did not start: $($_.Exception.Message)" }
   if ($code -eq 0) {
-    Write-Host "  M1D1 $version is installed. Open your project again to use it."
-    Set-Location $env:TEMP
-    Remove-Item -Recurse -Force $folder -ErrorAction SilentlyContinue
+    Write-Host "  M1D1 $version is installed. Open your project again (or restart the M1D1 app) to use it."
     if (-not $test) { Start-Sleep -Seconds 6 }
-    exit 0
+    Done 0
   }
-  if ($test) { exit 1 }
-  Write-Host '  The update did not install. Close every program that uses M1D1,'
+  if ($test) { Done $code }
+  Write-Host '  The update did not install. Close every program that has M1D1 open,'
   Write-Host '  then press Enter to try again, or close this window to stop.'
   [void](Read-Host)
 }
 )PS";
-    script = script.replace ("@FOLDER@", quoted (folder.getFullPathName())).replace ("@VERSION@", quoted (version));
+    if (! plainVersion (version)) return "The new version's number is not valid (" + version + "). It was not installed.";
+    script = script.replace ("@VERSION@", version);
+    // UTF-16 with a byte order mark: Windows PowerShell 5.1 reads a file without one in the old ANSI code page
     const auto file = folder.getChildFile ("finish-update.ps1");
-    if (! file.replaceWithText (script, false, false, "\r\n")) return "M1D1 cannot write the update script to " + folder.getFullPathName() + ".";
+    if (! file.replaceWithText (script, true, true, "\r\n")) return "M1D1 cannot write the update script to " + folder.getFullPathName() + ".";
     const auto ps = juce::File::getSpecialLocation (juce::File::windowsSystemDirectory).getChildFile ("WindowsPowerShell\\v1.0\\powershell.exe");
     if (! ps.startAsProcess ("-NoProfile -ExecutionPolicy Bypass -File \"" + file.getFullPathName() + "\""))
         return "Windows did not start the update. Open " + folder.getFullPathName() + "\\unpacked\\M1D1 and run Install.bat.";
@@ -476,15 +676,20 @@ while ($true) {
    #endif
 }
 
-void Updater::loadSettings()
+void Updater::loadSettings (bool all)
 {
-    const auto v = juce::JSON::parse (settingsFolder().getChildFile ("updates.json"));
+    juce::var v;
+    {
+        const juce::ScopedLock sl (settingsLock);
+        v = juce::JSON::parse (settingsFolder().getChildFile ("updates.json"));
+    }
     if (! v.isObject()) return;
     const juce::ScopedLock sl (lock);
-    lastCheck = (juce::int64) v["lastCheck"];
     skipVersion = v["skip"].toString();
     status.autoCheck = v.hasProperty ("auto") ? (bool) v["auto"] : true;
-    if (const auto r = v["release"]; r.isObject() && r["version"].toString().isNotEmpty())
+    if (! all) return;
+    lastCheck = (juce::int64) v["lastCheck"];
+    if (const auto r = v["release"]; r.isObject() && plainVersion (r["version"].toString()))
     {
         Release k;
         k.version = r["version"].toString(); k.name = r["name"].toString(); k.notes = r["notes"].toString();
@@ -495,26 +700,19 @@ void Updater::loadSettings()
     }
 }
 
-void Updater::saveSettings() const
+// Changes only the given values, on top of what the file holds now: several M1D1s (the plugin in a DAW, the app)
+// share the file, and one must not undo another's choice.
+void Updater::writeSettings (const std::function<void (juce::DynamicObject&)>& change) const
 {
-    auto* o = new juce::DynamicObject();
-    {
-        const juce::ScopedLock sl (lock);
-        o->setProperty ("lastCheck", lastCheck);
-        o->setProperty ("skip", skipVersion);
-        o->setProperty ("auto", status.autoCheck);
-        if (release)
-        {
-            auto* r = new juce::DynamicObject();
-            r->setProperty ("version", release->version); r->setProperty ("name", release->name);
-            r->setProperty ("notes", release->notes); r->setProperty ("page", release->page);
-            r->setProperty ("zipUrl", release->zipUrl); r->setProperty ("sha256", release->sha256);
-            r->setProperty ("zipSize", release->zipSize);
-            o->setProperty ("release", juce::var (r));
-        }
-    }
-    const auto folder = settingsFolder();
-    folder.createDirectory();
-    folder.getChildFile ("updates.json").replaceWithText (juce::JSON::toString (juce::var (o)));
+    const juce::ScopedLock sl (settingsLock);
+    juce::InterProcessLock processes ("M1D1-update-settings");
+    const bool locked = processes.enter (3000);
+    const auto file = settingsFolder().getChildFile ("updates.json");
+    auto v = juce::JSON::parse (file);
+    if (! v.isObject()) v = juce::var (new juce::DynamicObject());
+    change (*v.getDynamicObject());
+    file.getParentDirectory().createDirectory();
+    file.replaceWithText (juce::JSON::toString (v));
+    if (locked) processes.exit();
 }
 } // namespace m1d1

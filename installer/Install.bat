@@ -7,8 +7,8 @@ rem   the standalone app -> %ProgramFiles%\M1D1\M1D1.exe, with Start menu and de
 rem   the uninstaller    -> %ProgramFiles%\M1D1\Uninstall.bat, also listed in Settings > Apps
 rem Set M1D1_QUIET=1 to skip the pauses (used by the automatic tests).
 
-rem "quiet" as the second argument: no pauses (used by M1D1's own updater)
-if /i "%~2"=="quiet" set "M1D1_QUIET=1"
+rem "quiet" as the second argument (M1D1's own updater): no pause when it worked; a failure still waits, to be read
+if /i "%~2"=="quiet" set "M1D1_DONEQUIET=1"
 if /i "%~1"=="elevated" goto install
 net session >nul 2>&1
 if %errorlevel% equ 0 goto install
@@ -65,6 +65,15 @@ if exist "%VSTDIR%\Backline.vst3\" (
 )
 if exist "%ProgramFiles%\Backline\" rmdir /s /q "%ProgramFiles%\Backline"
 
+rem A program that has the plugin loaded (FL Studio, another DAW, the M1D1 app) keeps its file from being written.
+set "PLUGINDLL=%VSTDIR%\M1D1.vst3\Contents\x86_64-win\M1D1.vst3"
+if exist "%PLUGINDLL%" (
+    2>nul (>>"%PLUGINDLL%" type nul) || (
+        echo M1D1 is open in a program ^(a DAW or the M1D1 app^). Close it, then run Install.bat again.
+        goto fail
+    )
+)
+
 echo Installing the VST3 plugin...
 if not exist "%VSTDIR%" mkdir "%VSTDIR%"
 if exist "%VSTDIR%\M1D1.vst3\" rmdir /s /q "%VSTDIR%\M1D1.vst3"
@@ -105,7 +114,7 @@ echo.
 echo  In FL Studio: Options ^> Manage plugins ^> Find plugins, then add M1D1 as an effect on a mixer
 echo  insert (or load it in a channel). To play its MIDI on a synth, see README.txt.
 echo.
-if not "%M1D1_QUIET%"=="1" pause
+if not "%M1D1_QUIET%"=="1" if not "%M1D1_DONEQUIET%"=="1" pause
 exit /b 0
 
 :copyfail

@@ -40,7 +40,18 @@ jobs:
           "WEBVIEW2_DIR=$($dir -replace '\\','/')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - name: Configure
-        run: cmake -S . -B build -DJUCE_WEBVIEW2_PACKAGE_LOCATION="${{ env.WEBVIEW2_DIR }}"
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          # a release compiles its full version into M1D1 (CMake stops if it differs from the project version)
+          $extra = @()
+          if ($env:RELEASE_VERSION) {
+            if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$') { throw "Not a version: $env:RELEASE_VERSION (use 0.4.3 or 0.5.0-beta.1)" }
+            $extra += "-DM1D1_VERSION_STRING=$env:RELEASE_VERSION"
+          }
+          cmake -S . -B build -DJUCE_WEBVIEW2_PACKAGE_LOCATION="${{ env.WEBVIEW2_DIR }}" @extra
+          if ($LASTEXITCODE) { throw "CMake configure failed ($LASTEXITCODE)" }
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -67,8 +78,10 @@ jobs:
 
       - name: Package
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          version="${{ inputs.version }}"
+          version="$RELEASE_VERSION"
           if [ -z "$version" ]; then version=$(sed -n 's/^project(Backline VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt); fi
           mkdir -p dist/M1D1
           cp -r build/Backline_artefacts/Release/VST3/M1D1.vst3 dist/M1D1/
@@ -117,13 +130,30 @@ jobs:
 
       - name: Ask GitHub for the latest release, as M1D1 does
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           $env:M1D1_UPDATE_DIR = Join-Path $env:RUNNER_TEMP 'update-real'
           $out = & build\m1d1_update_tool_artefacts\Release\m1d1_update_tool.exe check
           $code = $LASTEXITCODE
           $out | ForEach-Object { Write-Host $_ }
-          if ($code -eq 2 -and ($out -join "`n") -match 'GitHub is busy') { Write-Host '::warning::GitHub limited the request; the live check was skipped.'; exit 0 }
+          $text = $out -join "`n"
+          if ($code -eq 2 -and $text -match 'GitHub is busy|No connection|HTTP 5') { Write-Host "::warning::GitHub could not be asked now; the live check was skipped."; exit 0 }
           if ($code -ne 0) { throw "The update check failed ($code)" }
+          $field = { param($name) (($out | Where-Object { $_ -like "$name=*" }) -replace "^$name=", '') }
+          # M1D1 reports the version this build packages
+          $built = (Get-Content dist\M1D1\version.txt -Raw).Trim()
+          if ((& $field 'current') -ne $built) { throw "M1D1 reports $(& $field 'current') but the package is $built" }
+          # and it heard the same latest full release as GitHub's own API
+          $tag = ''
+          $tag = gh api "repos/$env:REPO/releases/latest" --jq .tag_name 2>$null
+          if ($LASTEXITCODE) { $tag = '' }
+          $want = ($tag -replace '^v', '')
+          Write-Host "GitHub's latest full release: '$tag'"
+          if ((& $field 'latest') -ne $want) { throw "M1D1 read latest='$(& $field 'latest')', GitHub says '$want'" }
+          if ((& $field 'state') -notin 'upToDate', 'available') { throw "Unexpected state $(& $field 'state')" }
+          Write-Host 'M1D1 reads the live release answer correctly.'
 
       - name: Test the updater end to end (a newer release served from this machine)
         shell: pwsh
@@ -141,25 +171,41 @@ jobs:
              assets = @(@{ name = 'M1D1-Windows.zip'; browser_download_url = 'http://127.0.0.1:8765/M1D1-Windows.zip'; size = $zip.Length; digest = "sha256:$sha" }) } |
             ConvertTo-Json -Depth 5 | Set-Content (Join-Path $root 'latest.json')
           $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $root -PassThru -WindowStyle Hidden
-          Start-Sleep -Seconds 3
+          $log = Join-Path ([IO.Path]::GetTempPath()) 'M1D1-update-test.log'
+          Remove-Item $log -ErrorAction SilentlyContinue
           try {
+            # wait until the server answers
+            $deadline = (Get-Date).AddSeconds(30)
+            while ($true) {
+              try { Invoke-WebRequest 'http://127.0.0.1:8765/latest.json' -UseBasicParsing -TimeoutSec 2 | Out-Null; break } catch {}
+              if ((Get-Date) -gt $deadline) { throw 'The test server did not start' }
+              Start-Sleep -Milliseconds 300
+            }
             $env:M1D1_UPDATE_API = 'http://127.0.0.1:8765/latest.json'
             $env:M1D1_UPDATE_DIR = Join-Path $env:RUNNER_TEMP 'update-settings'
-            & build\m1d1_update_tool_artefacts\Release\m1d1_update_tool.exe update
-            if ($LASTEXITCODE) { throw "The updater did not get the update ready ($LASTEXITCODE)" }
-            # the "M1D1 update" window installs it with the package's own Install.bat
-            $key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\M1D1'
-            $deadline = (Get-Date).AddMinutes(3)
-            do { Start-Sleep -Seconds 2; $v = (Get-ItemProperty $key -ErrorAction SilentlyContinue).DisplayVersion } until ($v -eq '9.9.9' -or (Get-Date) -gt $deadline)
+            $env:M1D1_QUIET = '1'
+            $out = & build\m1d1_update_tool_artefacts\Release\m1d1_update_tool.exe update
+            $code = $LASTEXITCODE
+            $out | ForEach-Object { Write-Host $_ }
+            if ($code) { throw "The updater did not get the update ready ($code)" }
+            $folder = (($out | Where-Object { $_ -like 'folder=*' }) | Select-Object -Last 1) -replace '^folder=', ''
+            # the "M1D1 update" window installs it with the package's own Install.bat; it logs its exit code
+            $deadline = (Get-Date).AddMinutes(4)
+            do { Start-Sleep -Seconds 2; $done = (Test-Path $log) -and ((Get-Content $log -Raw) -match 'M1D1-UPDATE-EXIT (\d+)') } until ($done -or (Get-Date) -gt $deadline)
+            if (Test-Path $log) { Write-Host '--- M1D1 update window ---'; Get-Content $log | ForEach-Object { Write-Host $_ } }
+            if (-not $done) { throw 'The M1D1 update window did not finish' }
+            if ($Matches[1] -ne '0') { throw "The M1D1 update window ended with code $($Matches[1])" }
           } finally { Stop-Process $server -ErrorAction SilentlyContinue }
+          $v = (Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\M1D1').DisplayVersion
           Write-Host "Registered version after the update: $v"
           if ($v -ne '9.9.9') { throw 'The update did not install' }
           $app = (Get-Content (Join-Path $env:ProgramFiles 'M1D1\version.txt') -Raw).Trim()
           if ($app -ne '9.9.9') { throw "Program Files holds version $app" }
           if (-not (Test-Path (Join-Path $env:CommonProgramFiles 'VST3\M1D1.vst3\Contents\x86_64-win\M1D1.vst3'))) { throw 'The plugin is missing after the update' }
-          Start-Sleep -Seconds 2
-          if (Test-Path (Join-Path ([IO.Path]::GetTempPath()) 'M1D1Update\9.9.9')) { throw 'The downloaded update was not cleaned up' }
-          Write-Host 'The updater downloads, checks and installs a new version.'
+          $deadline = (Get-Date).AddSeconds(20)
+          while ($folder -and (Test-Path $folder) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+          if ($folder -and (Test-Path $folder)) { throw "The downloaded update was not cleaned up: $folder" }
+          Write-Host 'The updater downloads, checks and installs a new version (the already-administrator path; users see one Windows permission prompt instead).'
 
       - name: Test Uninstall.bat from the install folder
         shell: pwsh
