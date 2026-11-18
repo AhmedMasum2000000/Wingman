@@ -34,7 +34,21 @@ jobs:
           $dir = Join-Path $env:RUNNER_TEMP 'nuget'
           $pkg = Join-Path $dir 'Microsoft.Web.WebView2.1.0.1901.177'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          Invoke-WebRequest 'https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.1901.177' -OutFile (Join-Path $dir 'webview2.zip')
+          # two addresses for the same package, a few tries each (a runner's name lookup sometimes fails for a while)
+          $urls = @('https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.1901.177/microsoft.web.webview2.1.0.1901.177.nupkg',
+                    'https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.1901.177')
+          $got = $false
+          foreach ($try in 1..4) {
+            foreach ($u in $urls) {
+              try { Invoke-WebRequest $u -OutFile (Join-Path $dir 'webview2.zip'); $got = $true; break } catch { Write-Host "Try $try, $u : $($_.Exception.Message)" }
+            }
+            if ($got) { break }
+            Start-Sleep -Seconds (10 * $try)
+          }
+          if (-not $got) { throw 'Could not download the WebView2 SDK from NuGet' }
+          # the package's own checksum: the same bytes whichever address answered
+          $sha = (Get-FileHash (Join-Path $dir 'webview2.zip') -Algorithm SHA512).Hash
+          Write-Host "WebView2 SDK package SHA-512: $sha"
           Expand-Archive (Join-Path $dir 'webview2.zip') -DestinationPath $pkg -Force
           if (-not (Test-Path (Join-Path $pkg 'build\native\include\WebView2.h'))) { throw 'WebView2 SDK not found in the package' }
           "WEBVIEW2_DIR=$($dir -replace '\\','/')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
