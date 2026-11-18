@@ -1077,7 +1077,9 @@
     // move back by whole loops until the loop fits in the audio (the page would otherwise loop the audio short of the parts).
     if (!grid && read.spec && read.spec.length && bpm > 0) {
       const loopSec = read.spec.reduce((a, e) => a + e.len, 0) * 60 / bpm;
-      while (loopSec > 0 && beatOffsetSec + loopSec > audioSec + 0.02 && beatOffsetSec - loopSec >= -0.02) beatOffsetSec = Math.max(0, beatOffsetSec - loopSec);
+      // (a loop may start up to a quarter beat before the first sample: that much is not heard)
+      const slack = 0.25 * 60 / bpm;
+      while (loopSec > 0 && beatOffsetSec + loopSec > audioSec + 0.02 && beatOffsetSec - loopSec >= -slack) beatOffsetSec = Math.max(0, beatOffsetSec - loopSec);
       if (beatOffsetSec + loopSec > audioSec + 0.02) notes.push('the file is shorter than the progression read: its end is looped early');
     }
     return { bpm, bpmConfidence: Math.round(bpmConfidence * 1000) / 1000, beatOffsetSec: Math.round(beatOffsetSec * 10000) / 10000,
