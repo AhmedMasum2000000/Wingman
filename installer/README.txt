@@ -57,6 +57,8 @@ UPDATES
 
 UNINSTALL
   Settings > Apps > Installed apps > M1D1 > Uninstall, or double-click Uninstall.bat
+  It also removes what earlier versions (and the old Backline name) left behind: downloaded updates,
+  temporary files, the cache, settings and FL Studio's cached plugin entries. Your exported MIDI is kept.
   (in this folder or in C:\Program Files\M1D1). Your exported MIDI and audio in Music\M1D1\Exports is kept.
   Afterwards run Options > Manage plugins > Find plugins once in FL Studio.
 

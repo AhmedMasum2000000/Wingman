@@ -1,7 +1,9 @@
 @echo off
 setlocal EnableExtensions
 title M1D1 uninstaller
-rem Removes M1D1: the VST3 plugin, the standalone app, its shortcuts and its entry in Settings > Apps.
+rem Removes M1D1 and everything earlier versions left behind: the VST3 plugin (also the old Backline name and a
+rem per-user VST3 copy), the standalone app, shortcuts, the Settings > Apps entries, downloaded updates, temporary
+rem files, the WebView2 cache, settings and sample sounds, and FL Studio's cached plugin entries for M1D1.
 rem Your exported MIDI and audio files are never touched. Set M1D1_QUIET=1 to skip the questions and pauses.
 
 if /i "%~1"=="elevated" goto ready
@@ -47,26 +49,45 @@ for %%P in (FL64.exe FL.exe "FL Studio.exe" M1D1.exe) do (
     )
 )
 
-if exist "%VSTDIR%\M1D1.vst3\" (
-    echo Removing the VST3 plugin...
-    rmdir /s /q "%VSTDIR%\M1D1.vst3"
-    if exist "%VSTDIR%\M1D1.vst3\" goto busy
+for %%D in ("%VSTDIR%\M1D1.vst3" "%VSTDIR%\Backline.vst3" "%LOCALAPPDATA%\Programs\Common\VST3\M1D1.vst3" "%LOCALAPPDATA%\Programs\Common\VST3\Backline.vst3") do (
+    if exist "%%~D\" (
+        echo Removing %%~D
+        rmdir /s /q "%%~D"
+        if exist "%%~D\" goto busy
+    )
 )
-if exist "%APPDIR%\" (
-    echo Removing the standalone app...
-    rmdir /s /q "%APPDIR%"
-    if exist "%APPDIR%\" goto busy
+for %%D in ("%APPDIR%" "%ProgramFiles%\Backline") do (
+    if exist "%%~D\" (
+        echo Removing %%~D
+        rmdir /s /q "%%~D"
+        if exist "%%~D\" goto busy
+    )
 )
-echo Removing shortcuts...
+echo Removing shortcuts and the Settings ^> Apps entries...
 powershell -NoProfile -Command ^
-  "foreach ($dir in @([Environment]::GetFolderPath('CommonPrograms'), [Environment]::GetFolderPath('CommonDesktopDirectory'))) {" ^
-  "  Remove-Item (Join-Path $dir 'M1D1.lnk') -ErrorAction SilentlyContinue }" >nul 2>&1
+  "foreach ($dir in @([Environment]::GetFolderPath('CommonPrograms'), [Environment]::GetFolderPath('CommonDesktopDirectory'), [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('Desktop'))) {" ^
+  "  foreach ($n in 'M1D1.lnk','Backline.lnk') { Remove-Item (Join-Path $dir $n) -ErrorAction SilentlyContinue } }" >nul 2>&1
 reg delete "%KEY%" /f >nul 2>&1
+reg delete "HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\Backline" /f >nul 2>&1
 
+echo Removing downloaded updates and temporary files...
+for %%D in ("%TEMP%\M1D1" "%TEMP%\M1D1Update" "%TEMP%\M1D1UpdateTest" "%TEMP%\Backline") do if exist "%%~D\" rmdir /s /q "%%~D"
+
+echo Removing FL Studio's cached entries for M1D1...
+powershell -NoProfile -Command ^
+  "$db = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Image-Line';" ^
+  "if (Test-Path $db) { Get-ChildItem $db -Recurse -File -Include 'M1D1*.fst','M1D1*.nfo','Backline*.fst','Backline*.nfo' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }" >nul 2>&1
+
+rem Settings, the WebView2 cache and sample sounds: removed unless you answer N (always removed when quiet)
+set "KEEPDATA=0"
 if not "%M1D1_QUIET%"=="1" if exist "%APPDATA%\M1D1\" (
     echo.
-    choice /C YN /M "Also delete your M1D1 settings and sample sounds in %APPDATA%\M1D1"
-    if not errorlevel 2 rmdir /s /q "%APPDATA%\M1D1"
+    choice /C YN /M "Also delete your M1D1 settings, cache and sample sounds in %APPDATA%\M1D1"
+    if errorlevel 2 set "KEEPDATA=1"
+)
+if "%KEEPDATA%"=="0" (
+    for %%D in ("%APPDATA%\M1D1" "%LOCALAPPDATA%\M1D1" "%APPDATA%\Backline" "%LOCALAPPDATA%\Backline") do if exist "%%~D\" rmdir /s /q "%%~D"
+    for %%F in ("%APPDATA%\M1D1.settings" "%APPDATA%\Backline.settings") do if exist "%%~F" del /f /q "%%~F"
 )
 
 echo.

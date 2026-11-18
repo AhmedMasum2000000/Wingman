@@ -236,6 +236,11 @@ jobs:
         run: |
           $app = Join-Path $env:ProgramFiles 'M1D1'
           $env:M1D1_QUIET = '1'
+          # leftovers of earlier versions, which the uninstaller must clean up too
+          $old = @((Join-Path $env:CommonProgramFiles 'VST3\Backline.vst3'), (Join-Path $env:ProgramFiles 'Backline'),
+                   (Join-Path $env:TEMP 'M1D1Update\0.0.1-1'), (Join-Path $env:APPDATA 'M1D1\WebView2'), (Join-Path $env:APPDATA 'Backline'))
+          foreach ($d in $old) { New-Item -ItemType Directory -Force $d | Out-Null; Set-Content (Join-Path $d 'x.txt') 'x' }
+          reg add 'HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\Backline' /f /v DisplayName /t REG_SZ /d Backline | Out-Null
           cmd /c "`"$app\Uninstall.bat`" < NUL"
           Start-Sleep -Seconds 2
           $left = @(
@@ -244,7 +249,10 @@ jobs:
             (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'M1D1.lnk'),
             (Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'M1D1.lnk'),
             'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\M1D1',
-            (Join-Path $env:TEMP 'M1D1-uninstall.bat')
+            (Join-Path $env:TEMP 'M1D1-uninstall.bat'),
+            (Join-Path $env:CommonProgramFiles 'VST3\Backline.vst3'), (Join-Path $env:ProgramFiles 'Backline'),
+            (Join-Path $env:TEMP 'M1D1Update'), (Join-Path $env:APPDATA 'M1D1'), (Join-Path $env:APPDATA 'Backline'),
+            'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Backline'
           ) | Where-Object { Test-Path $_ }
           if ($left) { throw "Uninstall left behind: $($left -join ', ')" }
           Write-Host 'Uninstall.bat removes everything.'
