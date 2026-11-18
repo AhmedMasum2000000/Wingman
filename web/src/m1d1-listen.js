@@ -1013,7 +1013,7 @@
         for (let i = 0; i < confidence.length; i++) confidence[i] = Math.min(confidence[i], Math.round(cap * 1000) / 1000);
         if (pitched && pitchCap < 0.75) said.push('little of the sound is in clear notes (drums, noise or muted playing): the key and chords are not certain');
       }
-      return { key, keyConfidence, spec, confidence, chordConfidence, bassPcs, tonality, pitched, oneNote, said,
+      return { key, keyConfidence, spec, confidence, chordConfidence, bassPcs, tonality, pitched, oneNote, lone, said,
         spread: { tops, others: Math.round(others), offKey: Math.round(offKey * 100) / 100 } };
     }
     // The spectrum's own reading says whether there are chords to read at all (the drums-only and one-note tests were
@@ -1063,15 +1063,23 @@
       if (m) { third /= m; rest /= m; }
       let verdict = null;
       if (n >= 8 && plain.pitched && !plain.oneNote) {
-        const drums = cluster >= 0.6 * n && top >= 0.6 && rest < 3 && Math.abs(all.tuningCents) < 25;
+        const drums = cluster >= 0.6 * n && top >= 0.6 && rest < 3 && third < 0.6 && Math.abs(all.tuningCents) < 25;
         const one = !drums && top >= 0.9 && third < 0.25 && rest < 0.7;
         if (drums || one) verdict = { pitched: !drums, oneNote: one, lone };
       } else if (!plain.pitched && n >= 0.8 * wholeK.length && cluster < 0.3 * n && top < 0.5 && rest >= 3 && plain.tonality >= 0.3) verdict = { pitched: true, oneNote: false };
       if (verdict) plain = readPlain(verdict) || plain;
     }
-    const read = spec16 && plain.pitched && !plain.oneNote ? readChords(chroma, bass, { chroma: spec16, bass: specBass16 }, overtone, plain, wholeOf(all.chroma, all.bass, { c: spectral, b: spectralBass })) || plain : plain;
+    const read = spec16 && plain.pitched && (!plain.oneNote || notesHeard) ? readChords(chroma, bass, { chroma: spec16, bass: specBass16 }, overtone, plain, wholeOf(all.chroma, all.bass, { c: spectral, b: spectralBass })) || plain : plain;
     notes.push(...read.said);
     if (bpmConfidence < 0.35 && tempo && !grid) notes.push('the beat is not steady or not clear: tempo and chord timing may be off');
+    // A file is played back from beatOffsetSec for the length of the progression, over and over. A window read at the end
+    // of the file can run past its last sample; the progression repeats, so the same chords start whole loops earlier:
+    // move back by whole loops until the loop fits in the audio (the page would otherwise loop the audio short of the parts).
+    if (!grid && read.spec && read.spec.length && bpm > 0) {
+      const loopSec = read.spec.reduce((a, e) => a + e.len, 0) * 60 / bpm;
+      while (loopSec > 0 && beatOffsetSec + loopSec > audioSec + 0.02 && beatOffsetSec - loopSec >= -0.02) beatOffsetSec = Math.max(0, beatOffsetSec - loopSec);
+      if (beatOffsetSec + loopSec > audioSec + 0.02) notes.push('the file is shorter than the progression read: its end is looped early');
+    }
     return { bpm, bpmConfidence: Math.round(bpmConfidence * 1000) / 1000, beatOffsetSec: Math.round(beatOffsetSec * 10000) / 10000,
       key: read.key, keyConfidence: Math.round(read.keyConfidence * 1000) / 1000, spec: read.spec, confidence: read.confidence, chordConfidence: read.chordConfidence,
       bassPcs: read.bassPcs, notes, tuningCents: Math.round(all.tuningCents * 10) / 10, tonality: read.tonality, pitched: read.pitched, oneNote: read.oneNote,
