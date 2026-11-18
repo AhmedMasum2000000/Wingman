@@ -141,6 +141,7 @@ jobs:
             'old Backline gone' = -not (Test-Path (Join-Path $vst 'Backline.vst3'))
             'app'              = Test-Path (Join-Path $app 'M1D1.exe')
             'uninstaller'      = Test-Path (Join-Path $app 'Uninstall.bat')
+            'licence texts'    = (Test-Path (Join-Path $app 'LICENSE.txt')) -and (Test-Path (Join-Path $app 'THIRD_PARTY_NOTICES.txt')) -and (Test-Path (Join-Path $app 'licenses\basic-pitch\NOTICE'))
             'Start menu'       = Test-Path (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'M1D1.lnk')
             'Apps entry'       = Test-Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\M1D1'
           }

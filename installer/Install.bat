@@ -85,6 +85,10 @@ if not exist "%APPDIR%" mkdir "%APPDIR%"
 copy /Y "%SRC%M1D1.exe" "%APPDIR%\M1D1.exe" >nul || goto copyfail
 copy /Y "%SRC%Uninstall.bat" "%APPDIR%\Uninstall.bat" >nul || goto copyfail
 if exist "%SRC%README.txt" copy /Y "%SRC%README.txt" "%APPDIR%\README.txt" >nul
+rem The licences: M1D1's own (AGPLv3), the third-party notices (Basic Pitch, onnxruntime-web, nnAudio...) and their texts
+if exist "%SRC%LICENSE" copy /Y "%SRC%LICENSE" "%APPDIR%\LICENSE.txt" >nul
+if exist "%SRC%THIRD_PARTY_NOTICES.txt" copy /Y "%SRC%THIRD_PARTY_NOTICES.txt" "%APPDIR%\THIRD_PARTY_NOTICES.txt" >nul
+if exist "%SRC%licenses\" xcopy /E /I /Y /Q "%SRC%licenses" "%APPDIR%\licenses" >nul
 > "%APPDIR%\version.txt" echo %VERSION%
 
 echo Adding shortcuts...

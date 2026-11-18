@@ -66,6 +66,9 @@ void Engine::captureReset (double ppq, double bpm, double bpb)
 
 void Engine::capturePush (float mid, float side)
 {
+    // a host that sends a broken sample (NaN or infinity) must not spoil the whole capture
+    if (! std::isfinite (mid)) mid = 0.0f;
+    if (! std::isfinite (side)) side = 0.0f;
     decimSum += mid; decimSide += side;
     if (++decimCount < decim) return;
     ring[ringWrite] = decimSum / (float) decim; ringSide[ringWrite] = decimSide / (float) decim;
