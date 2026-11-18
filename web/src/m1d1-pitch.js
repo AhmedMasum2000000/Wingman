@@ -110,7 +110,8 @@
     }
     return { p: h0, q: k0 };
   }
-  function resample(x, srIn, srOut, opts) {
+  // onProgress(fraction), when given, is called every 8192 output samples (the Worker reports it to the page)
+  function resample(x, srIn, srOut, opts, onProgress) {
     srOut = srOut || SR;
     if (!(srIn > 0) || !(srOut > 0)) throw new Error('bad sample rate ' + srIn);
     if (Math.abs(srIn / srOut - 1) < 1e-12) return x;
@@ -128,6 +129,7 @@
       // unity gain at DC on every phase (as soxr's passband): divide each phase by its own sum
       for (let ph = 0; ph < P; ph++) { const g = 1 / norm[ph]; for (let j = 0; j < taps; j++) tab[ph * taps + j] *= g; }
       for (let n = 0; n < nOut; n++) {
+        if (onProgress && (n & 8191) === 0) onProgress(n / nOut);
         const num = n * M, c = Math.floor(num / P), ph = num - c * P, k0 = c - half + 1, base = ph * taps;
         let acc = 0;
         if (k0 >= 0 && k0 + taps <= L) {         // four partial sums: about a quarter faster in V8
@@ -146,6 +148,7 @@
     let dc = 0; for (let k = -half; k <= half; k++) dc += K.h(k);
     const g = 1 / dc, step = srIn / srOut;
     for (let n = 0; n < nOut; n++) {
+      if (onProgress && (n & 8191) === 0) onProgress(n / nOut);
       const t = n * step, c = Math.floor(t);
       let acc = 0;
       for (let k = c - half + 1; k <= c + half; k++) {
@@ -161,12 +164,15 @@
 
   // ---------- the model on 22050 Hz audio ----------
   // ort: the onnxruntime-web module; session: an InferenceSession of nmp.onnx; x: Float32Array at 22050 Hz.
-  // opts.batch: windows per model call (default 1); opts.onProgress(fraction); opts.cancelled(): true stops.
+  // opts.batch: windows per model call (default 1); opts.onProgress(fraction); opts.cancelled(): true stops;
+  // opts.pause(): awaited before each window (the Worker's way to take its messages, a cancel, during a run:
+  // onnxruntime-web's single-threaded run never gives the event loop a turn by itself).
   async function transcribe(ort, session, x, opts) {
     const o = opts || {}, batch = Math.max(1, o.batch | 0 || 1), L = x.length;
     const T = frameCount(L), nWin = Math.ceil(T / KEEP);         // windows whose kept frames are all past the end are skipped
     const note = new Float32Array(T * KEYS), inName = session.inputNames[0];
     for (let w0 = 0; w0 < nWin; w0 += batch) {
+      if (o.pause) await o.pause();
       if (o.cancelled && o.cancelled()) throw new Error('cancelled');
       const nb = Math.min(batch, nWin - w0), buf = new Float32Array(nb * N_WIN);
       for (let b = 0; b < nb; b++) {                             // window w = padded[w * 36164, + 43844), zeros past the end
@@ -193,6 +199,7 @@
   }
 
   // samples (any rate, mono) -> opts.notes. Cut at 64 s, resampled to 22050 Hz, run, times in seconds of `samples`.
+  // opts: as transcribe's, plus resample (kernel options) and onResample(fraction) while resampling.
   async function run(ort, session, samples, sr, opts) {
     if (!samples || typeof samples.length !== 'number') throw new Error('no audio');
     if (!(sr >= 4000 && sr <= 384000)) throw new Error('bad sample rate ' + sr);
@@ -200,7 +207,7 @@
     let x = samples instanceof Float32Array ? samples.subarray(0, n) : Float32Array.from(samples.slice(0, n));
     for (let i = 0; i < x.length; i++) if (!Number.isFinite(x[i])) { x = Float32Array.from(x, v => (Number.isFinite(v) ? v : 0)); break; }
     const t0 = now();
-    const a = resample(x, sr, SR, opts && opts.resample);
+    const a = resample(x, sr, SR, opts && opts.resample, opts && opts.onResample);
     const t1 = now();
     const r = await transcribe(ort, session, a, opts);
     const t2 = now();
@@ -218,13 +225,20 @@
   // The page makes the worker from a blob URL of this file plus 'M1D1Pitch.workerMain(self);'. Messages:
   //   in  { type: 'init', ort, mjs, wasm, model }   each a gzip + base64 string: ort.wasm.min.js, its .mjs glue,
   //                                                 ort-wasm-simd-threaded.wasm, nmp.onnx (onnxruntime-web 1.20.1)
-  //   in  { type: 'run', id, audio: Float32Array (transferred), sr }
-  //   out { type: 'ready', ms }  /  { type: 'result', id, note, times (ArrayBuffers, transferred), T, keys, midi0, ms }
-  //   out { type: 'error', id, stage: 'init' | 'run', message }
+  //   in  { type: 'run', id, audio: Float32Array (transferred), sr }   runs are done one at a time, in order
+  //   in  { type: 'cancel', id }                    that run is no longer wanted: it stops before its next model
+  //                                                 window (or does not start), and answers 'cancelled'
+  //   out { type: 'hello' }                         at once: the worker's script is running
+  //   out { type: 'ready', ms }                     the reader is set up (decoded, model compiled)
+  //   out { type: 'progress', id, stage: 'start' | 'resample' | 'model', done }   while a run goes on: at its start,
+  //                                                 at least every 250 ms of resampling, after every model window
+  //   out { type: 'result', id, note, times (ArrayBuffers, transferred), T, keys, midi0, ms }
+  //   out { type: 'cancelled', id }  /  { type: 'error', id, stage: 'init' | 'run', message }
   // ORT loads from blob URLs: env.wasm.wasmPaths = { mjs, wasm } (env.wasm.wasmBinary fails when the glue itself
   // comes from a blob URL in 1.20.1), one thread (the page is not cross-origin isolated).
   function workerMain(scope) {
-    let ready = null, ortMod = null, session = null;
+    let ready = null, ortMod = null, session = null, chain = Promise.resolve();
+    const pending = new Set(), cancelled = new Set();     // runs received and not answered yet; those cancelled
     const unb64 = s => { const bin = atob(s), u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return u8; };
     const gunzip = async s => new Uint8Array(await new Response(new Blob([unb64(s)]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
     const blobUrl = (bytes, type) => URL.createObjectURL(new Blob([bytes], { type }));
@@ -247,23 +261,35 @@
       scope.postMessage({ type: 'ready', ms, version: VERSION, ort: ortMod.env.versions && ortMod.env.versions.web });
       return ms;
     }
-    scope.onmessage = async ev => {
-      const m = ev.data || {};
-      if (m.type === 'init') { if (!ready) { ready = init(m); ready.catch(() => {}); } return; }
-      if (m.type !== 'run') return;
+    async function runOne(m) {
       let stage = 'init';
+      const isCancelled = () => cancelled.has(m.id);
       try {
         if (!ready) throw new Error('not initialised');
         const initMs = await ready;
         stage = 'run';
-        const r = await run(ortMod, session, m.audio, m.sr, { batch: m.batch || 1 });
+        if (isCancelled()) throw new Error('cancelled');
+        let last = 0;
+        const progress = (st, done) => { const t = now(); if (st === 'resample' && t - last < 250) return; last = t; scope.postMessage({ type: 'progress', id: m.id, stage: st, done }); };
+        progress('start', 0);
+        const r = await run(ortMod, session, m.audio, m.sr, { batch: m.batch || 1, cancelled: isCancelled, pause: () => new Promise(res => setTimeout(res, 0)),
+          onResample: f => progress('resample', f), onProgress: f => progress('model', f) });
         r.ms.init = initMs;
         scope.postMessage({ type: 'result', id: m.id, note: r.note.buffer, times: r.times.buffer, T: r.T, keys: r.keys, midi0: r.midi0, ms: r.ms },
           [r.note.buffer, r.times.buffer]);
       } catch (e) {
-        scope.postMessage({ type: 'error', id: m.id, stage, message: String((e && e.message) || e) });
-      }
+        if (stage === 'run' && isCancelled()) scope.postMessage({ type: 'cancelled', id: m.id });
+        else scope.postMessage({ type: 'error', id: m.id, stage, message: String((e && e.message) || e) });
+      } finally { pending.delete(m.id); cancelled.delete(m.id); }
+    }
+    scope.onmessage = ev => {
+      const m = ev.data || {};
+      if (m.type === 'init') { if (!ready) { ready = init(m); ready.catch(() => {}); } return; }
+      if (m.type === 'cancel') { if (pending.has(m.id)) cancelled.add(m.id); return; }
+      if (m.type !== 'run') return;
+      pending.add(m.id); chain = chain.then(() => runOne(m));
     };
+    scope.postMessage({ type: 'hello', version: VERSION });
   }
 
   return Object.freeze({ VERSION, SR, FFT_HOP, N_WIN, PAD, WIN_HOP, FRAMES, EDGE, KEEP, KEYS, MIDI0, MAX_SEC, OUT_NOTE,

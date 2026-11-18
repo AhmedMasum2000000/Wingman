@@ -1507,47 +1507,101 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   }
   // Note reading: Spotify's Basic Pitch (nmp.onnx, Apache-2.0) run by onnxruntime-web 1.20.1 (MIT, wasm, one thread)
   // in a Web Worker, made on the first read from the blocks at the end of the page (m1d1-pitch.js and the runtime,
-  // gzip + base64). Pitch.run(mono, rate) gives the analyser's opts.notes, or null when the reader is missing, fails
-  // or takes longer than 20 s: the chords are then read from the spectrum alone, as without it. One run at a time;
-  // Pitch.run(mono, rate, wanted) asks wanted() when its turn comes, and a read dropped meanwhile gives up its turn.
+  // gzip + base64). Pitch.run(mono, rate, wanted) gives the analyser's opts.notes, or null: the chords are then read
+  // from the spectrum alone, as without it, and Pitch.why(mono) says why (for the result chip). One run at a time;
+  // wanted() is asked when its turn comes and every 200 ms while it runs: a read dropped meanwhile gives up its turn,
+  // or is cancelled in the Worker (it stops before its next model window; the next read waits for that, not for the
+  // whole read).
+  // Time: the Worker reports progress all through a run (resampling at least every 250 ms, then each 2 s model window),
+  // and a run that makes no progress for 8 s is given up (the Worker is ended). Setting the reader up (decoding it,
+  // compiling the model: 1-10 s, once per Worker) is not counted: it has its own limit of 60 s. A slow machine still
+  // gets its notes, only later.
+  // Failures: two failed runs in a row, or a reader that cannot start, put it to rest for 3 minutes (reads meanwhile
+  // get null at once); then it is tried again.
   const Pitch = (() => {
-    const TIMEOUT = 20000, MAX_SEC = 64;
-    let worker = null, wurl = '', off = '', strikes = 0, seq = 0, cur = null, queue = Promise.resolve();
-    const stats = { runs: 0, ok: 0, skipped: 0, init: null, last: null };
+    const lim = { stall: 8000, setup: 60000, rest: 180000, poll: 200 }, MAX_SEC = 64;   // lim: tests may change it
+    // wState: '' no Worker, 'starting' made (its script not running yet), 'setup' setting up, 'ready'
+    let worker = null, wurl = '', wState = '', off = '', offUntil = 0, strikes = 0, seq = 0, cur = null, queue = Promise.resolve();
+    const stats = { runs: 0, ok: 0, skipped: 0, cancelled: 0, stalled: 0, init: null, last: null };
+    const whyNot = new WeakMap();   // audio array -> why its read gave no notes
     const block = id => { const e = document.getElementById(id), s = e ? e.textContent.trim() : ''; return s.includes('@@') ? '' : s; };
     function make() {
       const src = block('m1d1-pitch-src'), data = { ort: block('bp-ort-js'), mjs: block('bp-ort-mjs'), wasm: block('bp-ort-wasm'), model: block('bp-model') };
       if (!src || !data.ort || !data.mjs || !data.wasm || !data.model) throw new Error('the note reader is not in this page');
       if (typeof Worker === 'undefined' || typeof DecompressionStream === 'undefined' || typeof WebAssembly === 'undefined') throw new Error('this browser cannot run the note reader');
       wurl = URL.createObjectURL(new Blob([src + '\n;M1D1Pitch.workerMain(self);\n'], { type: 'text/javascript' }));
-      const w = new Worker(wurl);
-      w.onmessage = e => { const d = e.data || {}; if (wurl) { URL.revokeObjectURL(wurl); wurl = ''; } if (d.type === 'ready') stats.init = d.ms; else if (cur && d.id === cur.id) cur.done(d); };
-      w.onerror = e => { e.preventDefault(); if (cur) cur.done({ type: 'error', stage: 'worker', message: e.message || 'the note reader stopped' }); };
+      const w = new Worker(wurl); wState = 'starting';
+      w.onmessage = e => {
+        if (w !== worker) return;
+        const d = e.data || {}; if (wurl) { URL.revokeObjectURL(wurl); wurl = ''; }
+        if (d.type === 'hello' && wState === 'starting') wState = 'setup';
+        else if (d.type === 'ready') { wState = 'ready'; stats.init = d.ms; }
+        if (cur) cur.msg(d);
+      };
+      w.onerror = e => { e.preventDefault(); if (w === worker && cur) cur.msg({ type: 'error', id: cur.id, stage: 'worker', message: e.message || 'it stopped' }); };
       w.postMessage(Object.assign({ type: 'init' }, data));
       return w;
     }
-    // an error while loading the reader, or an error the Worker itself could not catch, turns it off for this
-    // session; a failed or slow run twice in a row too
-    const drop = (why, forGood) => { if (worker) worker.terminate(); worker = null; if (wurl) { URL.revokeObjectURL(wurl); wurl = ''; } if (forGood || ++strikes >= 2) off = why || 'failed'; };
-    const once = (f32, sr) => new Promise(resolve => {
-      const t0 = performance.now(), id = ++seq; let timer = 0; stats.runs++;
-      const end = (notes, why, inWorker) => { clearTimeout(timer); cur = null; stats.last = { ok: !!notes, why: why || '', ms: Math.round(performance.now() - t0), frames: notes ? notes.T : 0, sr, worker: inWorker || null }; if (notes) stats.ok++; resolve(notes); };
-      if (off) return end(null, off);
-      try { worker = worker || make(); } catch (e) { off = String((e && e.message) || e); return end(null, off); }
-      timer = setTimeout(() => { drop('took longer than ' + TIMEOUT / 1000 + ' s'); end(null, 'timeout'); }, TIMEOUT);
-      cur = { id, done: d => {
-        if (d.type === 'result') { strikes = 0; end({ note: new Float32Array(d.note), times: new Float64Array(d.times), keys: d.keys, midi0: d.midi0, T: d.T }, '', d.ms); }
-        else { drop(d.message, d.stage === 'init' || d.stage === 'worker'); end(null, `${d.stage}: ${d.message}`); }
+    const kill = () => { if (worker) worker.terminate(); worker = null; wState = ''; if (wurl) { URL.revokeObjectURL(wurl); wurl = ''; } };
+    const rest = why => { off = why; offUntil = performance.now() + lim.rest; };
+    // at rest: the reason, or '' (and when the rest is over, one more failure puts it to rest again)
+    const resting = () => { if (off && performance.now() >= offUntil) { off = ''; strikes = 1; } return off; };
+    const once = (f32, sr, wanted, give) => new Promise(free => {
+      const t0 = performance.now(), id = ++seq; let timer = 0, poll = 0, answered = false, w = null;
+      stats.runs++;
+      const answer = (notes, why, inWorker) => {
+        if (answered) return; answered = true;
+        stats.last = { ok: !!notes, why: why || '', ms: Math.round(performance.now() - t0), frames: notes ? notes.T : 0, sr, worker: inWorker || null };
+        if (notes) stats.ok++; give(notes, why);
+      };
+      // the Worker is free again (or gone): the next read may start
+      const finish = () => { clearTimeout(timer); clearInterval(poll); if (cur && cur.id === id) cur = null; free(); };
+      // a failure: the Worker is ended; it rests after two in a row, or at once (now)
+      const fail = (why, now) => { kill(); if (now || ++strikes >= 2) rest(why); answer(null, why); finish(); };
+      const o = resting(); if (o) { answer(null, `${o}; it is tried again in a few minutes`); return finish(); }
+      try { w = worker = worker || make(); } catch (e) { rest(String((e && e.message) || e)); answer(null, off); return finish(); }
+      const arm = ms => { clearTimeout(timer); timer = setTimeout(stalled, ms); };
+      function stalled() {
+        stats.stalled++;
+        fail(wState === 'setup' ? `the note reader took longer than ${lim.setup / 1000} s to start`
+          : wState === 'starting' ? 'the note reader did not start' : `the note reader made no progress for ${lim.stall / 1000} s`);
+      }
+      cur = { id, msg: d => {
+        if (d.type === 'hello') return arm(wState === 'ready' ? lim.stall : lim.setup);   // setup is not counted
+        if (d.type === 'ready') return arm(lim.stall);                                     // now the run itself starts
+        if (d.id !== id) return;
+        if (d.type === 'progress') return arm(lim.stall);
+        if (d.type === 'result') {
+          strikes = 0; answer({ note: new Float32Array(d.note), times: new Float64Array(d.times), keys: d.keys, midi0: d.midi0, T: d.T }, '', d.ms);
+          return finish();
+        }
+        if (d.type === 'cancelled') { answer(null, 'cancelled'); return finish(); }
+        if (d.type !== 'error') return;
+        // a run that failed counts once; a reader that could not start, or a Worker that broke, rests at once
+        if (d.stage === 'run') fail(`the note reader failed: ${d.message}`);
+        else fail(d.stage === 'init' ? `the note reader could not start: ${d.message}` : `the note reader stopped: ${d.message}`, true);
       } };
+      arm(wState === 'setup' ? lim.setup : lim.stall);
       const a = f32.slice(0, Math.min(f32.length, Math.floor(MAX_SEC * sr)));
-      try { worker.postMessage({ type: 'run', id, audio: a, sr }, [a.buffer]); } catch (e) { drop(String(e)); end(null, String(e)); }
+      try { w.postMessage({ type: 'run', id, audio: a, sr }, [a.buffer]); } catch (e) { return fail(`the note reader failed: ${(e && e.message) || e}`); }
+      // no longer wanted while it runs: cancelled in the Worker, and the read is answered now (the Worker is free
+      // again when it says so, or when it stalls)
+      if (wanted) poll = setInterval(() => {
+        if (answered || wanted()) return;
+        stats.cancelled++; answer(null, 'cancelled');
+        try { w.postMessage({ type: 'cancel', id }); } catch (e) {}
+      }, lim.poll);
     });
     const run = (f32, sr, wanted) => {
       if (!f32 || !f32.length || !(sr > 0)) return Promise.resolve(null);
-      const p = queue.then(() => { if (wanted && !wanted()) { stats.skipped++; return null; } return once(f32, sr); }).catch(() => null);
-      queue = p; return p;
+      let given = false, answerP = null;
+      const p = new Promise(r => { answerP = r; });
+      const give = (notes, why) => { if (given) return; given = true; if (notes) whyNot.delete(f32); else whyNot.set(f32, why || 'it gave no notes'); answerP(notes || null); };
+      queue = queue.then(() => { if (wanted && !wanted()) { stats.skipped++; give(null, 'skipped'); return; } return once(f32, sr, wanted, give); })
+        .catch(e => give(null, `the note reader failed: ${(e && e.message) || e}`));
+      return p;
     };
-    return { run, stats, get off() { return off; } };
+    return { run, why: f32 => whyNot.get(f32) || '', stats, lim, get off() { return resting(); } };
   })();
   window.__m1d1Pitch = Pitch;
   // the file as the analyser hears it: up to a minute of it, mixed to mono
@@ -1556,13 +1610,30 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     for (let c = 0; c < chs; c++) { const d = buf.getChannelData(c); for (let i = 0; i < n; i++) mono[i] += d[i] / chs; }
     return mono;
   };
-  // listen to the file: up to a minute of it, mixed to mono (monoIn: that mix, when the caller already made it)
-  function listenTo(buf, extra, pre, monoIn) {
+  // A read that failed: the analyser's fallback (res.failed), or, to be safe, a result with nothing in it (no chords,
+  // no confidence at all, no tempo or key). Nothing of it is shown: the page keeps what it had and says so.
+  const zeroish = v => typeof v === 'number' && !(v > 0);
+  const readFailed = res => !res || !!res.failed || !Array.isArray(res.spec) || !res.spec.length || !(res.bpm > 0 && res.bpm < 1000)
+    || !res.key || !Number.isInteger(res.key.root) || (zeroish(res.chordConfidence) && zeroish(res.keyConfidence));
+  const failWhy = res => {
+    const n = res && Array.isArray(res.notes) ? res.notes.filter(s => typeof s === 'string' && s) : [];
+    return res && typeof res.failed === 'string' && res.failed ? res.failed : n.length ? n[n.length - 1] : 'the analysis gave nothing';
+  };
+  function couldNotAnalyse(res, label) {
+    const chip = $('#exampleChip'), why = failWhy(res), had = stage4 || exampleOn || !!heard || mode === 'generate';
+    chip.hidden = false; chip.textContent = 'Could not analyse this audio';
+    chip.title = `${why[0].toUpperCase() + why.slice(1)}. ${had ? 'The chords shown were left as they were.' : 'Nothing was read from it.'}`;
+    $('#fileName').textContent = label; react('puffed', 2.5);
+  }
+  // listen to the file: up to a minute of it, mixed to mono (monoIn: that mix, when the caller already made it;
+  // pre: the analysis, when the caller already made it; notesWhy: why the notes were not read, for the chip)
+  function listenTo(buf, extra, pre, monoIn, notesWhy) {
     sessionNote = '';
     const mono = pre ? null : monoIn || fileMono(buf);
     let res = pre || null; if (!res) try { res = M1D1Listen.analyse(mono, buf.sampleRate, { gen: M1D1Gen, ...(extra || {}) }); } catch (e) { res = null; }
-    const chip = $('#exampleChip'); chip.hidden = false;
-    if (!res || !res.spec || !res.spec.length) { heard = null; chip.textContent = 'Could not analyse this audio'; chip.title = 'The chords shown are an example, not read from this file.'; return false; }
+    const chip = $('#exampleChip');
+    if (readFailed(res)) { couldNotAnalyse(res, $('#fileName').textContent); return false; }   // the callers check first
+    chip.hidden = false;
     if (res.pitched === false) { chip.textContent = 'No chords heard in this audio'; chip.title = 'It sounds like drums or noise only. The chords were left as they were.'; react('thinking', 2); return false; }
     heard = { bpm: res.bpm, start: Math.max(0, Math.min(buf.duration - .5, res.beatOffsetSec || 0)), res, beats: res.spec.reduce((a, e) => a + e.len, 0) };
     keyRoot = res.key.root; scaleIdx = res.key.scaleIdx; detected.root = keyRoot; detected.scale = scaleIdx;
@@ -1570,7 +1641,8 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     knobs.forEach(k => { if (k.steps) k.sync(); }); setTempo(res.bpm, !!(extra && extra.grid)); T.x.t = railT(tempo); $('#btnUndo').disabled = true;
     const conf = Math.round(100 * Math.min(res.keyConfidence ?? 1, res.chordConfidence ?? 1, res.bpmConfidence > 0 ? 1 : .5));
     heard.conf = conf; chip.textContent = `Read from your audio · ${conf}% sure`;
-    chip.title = (res.notes && res.notes.length ? res.notes.join('. ') + '. ' : '') + `Detected ${res.bpm.toFixed(1)} BPM. Chords marked ? are the ones M1D1 is least sure of.`;
+    chip.title = (res.notes && res.notes.length ? res.notes.join('. ') + '. ' : '') + `Detected ${res.bpm.toFixed(1)} BPM. Chords marked ? are the ones M1D1 is least sure of.`
+      + (extra && extra.notes ? '' : ` The notes were not read${notesWhy ? ` (${notesWhy})` : ''}: the chords come from the spectrum alone.`);
     return true;
   }
   async function loadFile(f) {
@@ -1586,9 +1658,13 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
       // the notes of this file's own audio; null: the spectrum alone reads the chords
       const notes = await Pitch.run(mono, buf.sampleRate, () => tok === readGen);
       if (tok !== readGen) return;
+      const extra = notes ? { notes } : undefined;
+      let res = null; try { res = M1D1Listen.analyse(mono, buf.sampleRate, { gen: M1D1Gen, ...(extra || {}) }); } catch (e) { res = null; }
+      // it could not be analysed: what was there stays (audio, chords, mode); the label and the chip say so
+      if (readFailed(res)) { couldNotAnalyse(res, `${name.slice(0, 28)} · could not be analysed`); return; }
       buffer = buf; if (mode === 'generate') setMode('extract'); hasAudio = true; isExample = false; offset = 0; overview = null; $('#hint').hidden = true;
       fileName = name; $('#fileName').textContent = fileName.slice(0, 40);
-      const fileTempoBefore = tempo, ok = listenTo(buf, notes ? { notes } : undefined, null, mono);
+      const fileTempoBefore = tempo, ok = listenTo(buf, extra, res, mono, Pitch.why(mono));
       if (!ok && !hadChords) {
         buffer = null; hasAudio = false; $('#hint').hidden = false; $('#exampleChip').hidden = true;
         $('#fileName').textContent = `${fileName.slice(0, 28)} · no chords heard in it (drums only?)`; ui(); return;
@@ -1601,7 +1677,8 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     finally { if (liveRead === tok) liveRead = 0; }
   }
   $('#btnOpen').addEventListener('click', () => $('#fileIn').click());
-  $('#fileIn').addEventListener('change', e => loadFile(e.target.files[0]));
+  // the input is emptied once it has the file, so the same file can be opened again (after it changed, or failed)
+  $('#fileIn').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; loadFile(f); });
   let dragDepth = 0; const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
   win.addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; $('#drop').hidden = false; });
   win.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
@@ -1642,7 +1719,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   $('#portOk').addEventListener('click', closeDialogs);
   $$('.overlay').forEach(o => o.addEventListener('click', e => { if (e.target === o) closeDialogs(); }));
   addEventListener('keydown', e => { if (e.key === 'Escape') closeDialogs(); });
-  $('#btnExample').addEventListener('click', () => { readGen++; sessionNote = ''; sessionName = ''; exampleOn = true; isExample = true; hasAudio = true; buffer = null; heard = null; detected.root = 9; detected.scale = 0; overview = null; $('#hint').hidden = true; $('#fileName').textContent = 'Example loop'; $('#exampleChip').hidden = false; $('#exampleChip').textContent = 'Example'; run(); });
+  $('#btnExample').addEventListener('click', () => { readGen++; sessionNote = ''; sessionName = ''; exampleOn = true; isExample = true; hasAudio = true; buffer = null; heard = null; detected.root = 9; detected.scale = 0; overview = null; $('#hint').hidden = true; $('#fileName').textContent = 'Example loop'; $('#exampleChip').hidden = false; $('#exampleChip').textContent = 'Example'; $('#exampleChip').title = ''; run(); });
 
   function ui() {
     const b = $('#playBtn'), snd = anyOn(); b.setAttribute('aria-pressed', String(snd)); b.setAttribute('aria-label', snd ? 'Stop (Space)' : 'Play (Space)'); b.title = snd ? 'Stop (Space)' : mode === 'generate' ? 'Play the three parts (Space)' : 'Play your audio (Space)';
@@ -2309,7 +2386,9 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
         const r = await call('getTrackAudio');
         if (stale()) return 'stale';
         if (!r || !r.b64) { if (!quiet) { $('#fileName').textContent = 'Play your project for a few bars, then press Listen to track'; react('thinking', 2); } return false; }
-        if (!(r.level > 1e-4)) { $('#fileName').textContent = 'M1D1 hears nothing on this track: put it on the mixer insert your audio plays through'; react('pout', 2); return false; }
+        // the level of what was heard (RMS): only a real number this low means silence. A level that is not a number
+        // (NaN or infinity: JUCE sends those as null) says nothing about the audio: it is read anyway
+        if (typeof r.level === 'number' && Number.isFinite(r.level) && r.level <= 1e-4) { $('#fileName').textContent = 'M1D1 hears nothing on this track: put it on the mixer insert your audio plays through'; react('pout', 2); return false; }
         const f32of = s => { const bin = atob(s), u8 = new Uint8Array(bin.length); for (let k = 0; k < bin.length; k++) u8[k] = bin.charCodeAt(k); return new Float32Array(u8.buffer); };
         const f32 = f32of(r.b64), side = r.side ? f32of(r.side) : null; audio();
         // in 7/8 a bar can start half-way through a beat: the first whole beat comes that much later
@@ -2324,7 +2403,14 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
         if (stale()) return 'stale';
         if (notes) opts.notes = notes;
         let res = null; try { res = M1D1Listen.analyse(f32, r.sr, { gen: M1D1Gen, ...opts }); } catch (e) { res = null; }
-        if (!res || res.pitched === false || (quiet && res.oneNote)) {
+        // it could not be analysed: the chords shown stay. On its own it keeps waiting (or keeps what it shows);
+        // a press says so
+        if (readFailed(res)) {
+          if (quiet === 'again') return false;
+          if (quiet) { waitingForTrack = true; return false; }
+          couldNotAnalyse(res, 'M1D1 could not analyse the audio on this track'); return false;
+        }
+        if (res.pitched === false || (quiet && res.oneNote)) {
           // listening on its own keeps waiting (an intro of drums only), or keeps the chords it already shows;
           // a press says what was heard
           if (quiet === 'again') return false;
@@ -2338,7 +2424,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
         lastReadSig = sig; readUserSig = null;
         const buf = ctx.createBuffer(1, f32.length, r.sr); buf.copyToChannel(f32, 0);
         if (mode === 'generate') setMode('extract');
-        listenTo(buf, opts, res);
+        listenTo(buf, opts, res, null, Pitch.why(f32));
         pause(); buffer = buf; hasAudio = true; isExample = false; offset = 0; overview = null; $('#hint').hidden = true;
         fileName = 'Your track'; waitingForTrack = false; noChordsYet = false;
         const warn = res.notes.find(n => /not the project|less than .* bars were heard|seems longer than/.test(n));
