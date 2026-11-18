@@ -616,6 +616,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
         <div class="upbar" id="upBar" hidden><i id="upFill"></i></div>
         <label class="chk"><input type="checkbox" id="upAuto" checked> Look for a new version when M1D1 opens</label>
         <div class="row"><button class="hw" id="upPage" hidden>What's new</button><button class="hw" id="upSkip" hidden>Skip this version</button><button class="hw" id="upClose">Close</button><button class="hw" id="upGo">Check now</button></div>
+        <p id="bpCredits" style="font-size: 11.5px; line-height: 1.45; color: var(--dim, #8a8a8a);">M1D1 reads the notes in your audio with Spotify's Basic Pitch (Apache-2.0), run by onnxruntime-web (MIT).</p>
       </div>
     </div>
     </div>
@@ -1498,11 +1499,60 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     $('#timeLen').textContent = hasAudio ? fmtT(loopSecs()) : '0:00';
     syncStates(); ui();
   }
+  // Note reading: Spotify's Basic Pitch (nmp.onnx, Apache-2.0) run by onnxruntime-web 1.20.1 (MIT, wasm, one thread)
+  // in a Web Worker, made on the first read from the blocks at the end of the page (m1d1-pitch.js and the runtime,
+  // gzip + base64). Pitch.run(mono, rate) gives the analyser's opts.notes, or null when the reader is missing, fails
+  // or takes longer than 20 s: the chords are then read from the spectrum alone, as without it. One run at a time.
+  const Pitch = (() => {
+    const TIMEOUT = 20000, MAX_SEC = 64;
+    let worker = null, wurl = '', off = '', strikes = 0, seq = 0, cur = null, queue = Promise.resolve();
+    const stats = { runs: 0, ok: 0, init: null, last: null };
+    const block = id => { const e = document.getElementById(id), s = e ? e.textContent.trim() : ''; return s.includes('@@') ? '' : s; };
+    function make() {
+      const src = block('m1d1-pitch-src'), data = { ort: block('bp-ort-js'), mjs: block('bp-ort-mjs'), wasm: block('bp-ort-wasm'), model: block('bp-model') };
+      if (!src || !data.ort || !data.mjs || !data.wasm || !data.model) throw new Error('the note reader is not in this page');
+      if (typeof Worker === 'undefined' || typeof DecompressionStream === 'undefined' || typeof WebAssembly === 'undefined') throw new Error('this browser cannot run the note reader');
+      wurl = URL.createObjectURL(new Blob([src + '\n;M1D1Pitch.workerMain(self);\n'], { type: 'text/javascript' }));
+      const w = new Worker(wurl);
+      w.onmessage = e => { const d = e.data || {}; if (wurl) { URL.revokeObjectURL(wurl); wurl = ''; } if (d.type === 'ready') stats.init = d.ms; else if (cur && d.id === cur.id) cur.done(d); };
+      w.onerror = e => { e.preventDefault(); if (cur) cur.done({ type: 'error', stage: 'worker', message: e.message || 'the note reader stopped' }); };
+      w.postMessage(Object.assign({ type: 'init' }, data));
+      return w;
+    }
+    // an error while loading the reader, or an error the Worker itself could not catch, turns it off for this
+    // session; a failed or slow run twice in a row too
+    const drop = (why, forGood) => { if (worker) worker.terminate(); worker = null; if (wurl) { URL.revokeObjectURL(wurl); wurl = ''; } if (forGood || ++strikes >= 2) off = why || 'failed'; };
+    const once = (f32, sr) => new Promise(resolve => {
+      const t0 = performance.now(), id = ++seq; let timer = 0; stats.runs++;
+      const end = (notes, why, inWorker) => { clearTimeout(timer); cur = null; stats.last = { ok: !!notes, why: why || '', ms: Math.round(performance.now() - t0), frames: notes ? notes.T : 0, sr, worker: inWorker || null }; if (notes) stats.ok++; resolve(notes); };
+      if (off) return end(null, off);
+      try { worker = worker || make(); } catch (e) { off = String((e && e.message) || e); return end(null, off); }
+      timer = setTimeout(() => { drop('took longer than ' + TIMEOUT / 1000 + ' s'); end(null, 'timeout'); }, TIMEOUT);
+      cur = { id, done: d => {
+        if (d.type === 'result') { strikes = 0; end({ note: new Float32Array(d.note), times: new Float64Array(d.times), keys: d.keys, midi0: d.midi0, T: d.T }, '', d.ms); }
+        else { drop(d.message, d.stage === 'init' || d.stage === 'worker'); end(null, `${d.stage}: ${d.message}`); }
+      } };
+      const a = f32.slice(0, Math.min(f32.length, Math.floor(MAX_SEC * sr)));
+      try { worker.postMessage({ type: 'run', id, audio: a, sr }, [a.buffer]); } catch (e) { drop(String(e)); end(null, String(e)); }
+    });
+    const run = (f32, sr) => {
+      if (!f32 || !f32.length || !(sr > 0)) return Promise.resolve(null);
+      const p = queue.then(() => once(f32, sr)).catch(() => null);
+      queue = p; return p;
+    };
+    return { run, stats, get off() { return off; } };
+  })();
+  window.__m1d1Pitch = Pitch;
+  // the file as the analyser hears it: up to a minute of it, mixed to mono
+  const fileMono = buf => {
+    const n = Math.min(buf.length, Math.floor(buf.sampleRate * 60)), mono = new Float32Array(n), chs = buf.numberOfChannels;
+    for (let c = 0; c < chs; c++) { const d = buf.getChannelData(c); for (let i = 0; i < n; i++) mono[i] += d[i] / chs; }
+    return mono;
+  };
   // listen to the file: up to a minute of it, mixed to mono
   function listenTo(buf, extra, pre) {
     sessionNote = '';
-    const n = Math.min(buf.length, Math.floor(buf.sampleRate * 60)), mono = new Float32Array(n), chs = buf.numberOfChannels;
-    for (let c = 0; c < chs; c++) { const d = buf.getChannelData(c); for (let i = 0; i < n; i++) mono[i] += d[i] / chs; }
+    const mono = pre ? null : fileMono(buf);
     let res = pre || null; if (!res) try { res = M1D1Listen.analyse(mono, buf.sampleRate, { gen: M1D1Gen, ...(extra || {}) }); } catch (e) { res = null; }
     const chip = $('#exampleChip'); chip.hidden = false;
     if (!res || !res.spec || !res.spec.length) { heard = null; chip.textContent = 'Could not analyse this audio'; chip.title = 'The chords shown are an example, not read from this file.'; return false; }
@@ -1521,8 +1571,10 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     try {
       const hadChords = stage4 || exampleOn || !!heard || mode === 'generate';
       buffer = await ctx.decodeAudioData(await f.arrayBuffer()); if (mode === 'generate') setMode('extract'); hasAudio = true; isExample = false; offset = 0; overview = null; $('#hint').hidden = true;
-      fileName = f.name.replace(/\.[^.]+$/, ''); $('#fileName').textContent = fileName.slice(0, 40);
-      const fileTempoBefore = tempo, ok = listenTo(buffer);
+      fileName = f.name.replace(/\.[^.]+$/, ''); $('#fileName').textContent = `${fileName.slice(0, 28)} · reading the notes…`;
+      const notes = await Pitch.run(fileMono(buffer), buffer.sampleRate);   // null: the spectrum alone reads the chords
+      $('#fileName').textContent = fileName.slice(0, 40);
+      const fileTempoBefore = tempo, ok = listenTo(buffer, notes ? { notes } : undefined);
       if (!ok && !hadChords) {
         buffer = null; hasAudio = false; $('#hint').hidden = false; $('#exampleChip').hidden = true;
         $('#fileName').textContent = `${fileName.slice(0, 28)} · no chords heard in it (drums only?)`; ui(); return;
@@ -2240,6 +2292,12 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
       // in 7/8 a bar can start half-way through a beat: the first whole beat comes that much later
       const firstWhole = Math.ceil(r.startBeat - 1e-6), gridOf = { bpm: r.bpm, firstBeatSec: Math.max(0, firstWhole - r.startBeat) * 60 / r.bpm, startBeat: r.startBeat, beatsPerBar: r.beatsPerBar, segments: r.segments };
       const opts = { grid: gridOf, side };
+      // the notes (Basic Pitch, in its Worker) on the mid channel; null: the spectrum alone reads the chords
+      const lab = $('#fileName'), was = lab.textContent, reading = 'Reading the notes…';
+      lab.textContent = reading;
+      const notes = await Pitch.run(f32, r.sr);
+      if (lab.textContent === reading) lab.textContent = was;
+      if (notes) opts.notes = notes;
       let res = null; try { res = M1D1Listen.analyse(f32, r.sr, { gen: M1D1Gen, ...opts }); } catch (e) { res = null; }
       if (!res || res.pitched === false || (quiet && res.oneNote)) {
         // listening on its own keeps waiting (an intro of drums only), or keeps the chords it already shows;
@@ -2264,7 +2322,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
       else { ui(); run(); }
       return true;
     }
-    tb.addEventListener('click', () => { rereads = 0; listenToTrack(false); });
+    tb.addEventListener('click', async () => { rereads = 0; busy = true; try { await listenToTrack(false); } finally { busy = false; } });
     hostModeChanged = () => { if (mode === 'generate') waitingForTrack = false; else if (!buffer && !exampleOn && !sessionNote) startEmpty(); };
     // listening on its own: once the DAW has played one whole 4-bar stretch of the song's grid
     // After the first read, M1D1 reads the track again each time 4 more bars have played (an intro gives way to the
@@ -2330,3 +2388,13 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   window.__m1d1 = { frameShown: () => frameShown, beat: () => beatPos(), holdFace, react, motion, play, pause, run, setPart, zipFor: i => zipOne(parts[i].key + '.mid', smf(i)), smf, PT: () => PT, spec: () => spec, view, notesFor, fitFor, generate, setKept, setStyle, setKey, undo: () => $('#btnUndo').click() };
 })();
 </script>
+<!-- Note reading (see Pitch above): nothing below runs when the page loads. The Worker is made from the first block
+     on the first read; the other blocks are third-party files, unmodified, stored gzip + base64:
+@@BP_CREDITS@@ -->
+<script type="text/plain" id="m1d1-pitch-src">
+/*@@PITCH@@*/
+</script>
+<script type="application/octet-stream" id="bp-ort-js">@@BP_ORT_JS@@</script>
+<script type="application/octet-stream" id="bp-ort-mjs">@@BP_ORT_MJS@@</script>
+<script type="application/octet-stream" id="bp-ort-wasm">@@BP_ORT_WASM@@</script>
+<script type="application/octet-stream" id="bp-model">@@BP_MODEL@@</script>

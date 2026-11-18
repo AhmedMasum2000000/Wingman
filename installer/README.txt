@@ -2,11 +2,14 @@ M1D1 for Windows (64-bit) - a plugin by ACND
 MIDI extractor and generator: audio in -> key, BPM, Camelot and chords -> MIDI for bass, chords and lead.
 
 WHAT IS IN THIS FOLDER
-  Install.bat      Double-click to install everything (asks for administrator rights).
-  Uninstall.bat    Double-click to remove everything again.
-  M1D1.vst3        The plugin for FL Studio (and any other VST3 host).
-  M1D1.exe         The standalone app. Runs on its own, no DAW needed.
-  version.txt      The version of this download.
+  Install.bat              Double-click to install everything (asks for administrator rights).
+  Uninstall.bat            Double-click to remove everything again.
+  M1D1.vst3                The plugin for FL Studio (and any other VST3 host).
+  M1D1.exe                 The standalone app. Runs on its own, no DAW needed.
+  version.txt              The version of this download.
+  LICENSE                  M1D1's licence, the GNU Affero General Public License v3.
+  THIRD_PARTY_NOTICES.txt  The parts from other projects inside M1D1, with their licences.
+  licenses                 The licence texts and notices of those parts.
 
 INSTALL
   1. Close FL Studio.
@@ -66,3 +69,10 @@ BY HAND (no installer)
 WINDOWS WARNINGS
   The files are not code-signed, so Windows SmartScreen may say "Windows protected your PC".
   Choose "More info", then "Run anyway". The source code is public (AGPLv3).
+
+LICENCE AND CREDITS
+  M1D1 is free software under the GNU Affero General Public License v3 (LICENSE in this folder).
+  Its source code: https://github.com/AhmedMasum2000000/Wingman
+  M1D1 hears the notes in your audio with Spotify's Basic Pitch model (Apache-2.0, Copyright 2022 Spotify AB),
+  run by Microsoft's ONNX Runtime Web (MIT). THIRD_PARTY_NOTICES.txt lists these and the other parts M1D1 is
+  built with, and says where each licence text is. Spotify and Microsoft do not endorse M1D1.

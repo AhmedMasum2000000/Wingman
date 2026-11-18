@@ -10,6 +10,7 @@ code, models or content from any commercial product.
 
 - **Record** audio from the track it sits on, in time with the host transport.
 - **Detect the key** of the recording (you can override it).
+- **Hear the notes** in the audio with Spotify's Basic Pitch model, run offline inside M1D1, so the chords and bass it reads are more accurate.
 - **Suggest four chord progressions** that fit the audio, one chord per 2 beats, bar or 2 bars.
 - **Edit chords**: click a chord to swap it for an alternative, ranked by how well it fits.
 - **Chord and bass rhythm presets**, previewed with a built-in synth in sync with the DAW.
@@ -88,3 +89,13 @@ M1D1 (formerly Backline) is free and open source under the GNU Affero General Pu
 You can use, copy and change it for free; if you distribute a modified version, share its source
 under the same licence. JUCE is used under its AGPLv3 option. The bundled fonts are under the
 SIL Open Font License (see `assets/README.md`).
+
+M1D1 reads notes with Spotify's Basic Pitch model (Apache-2.0, Copyright 2022 Spotify AB), run by Microsoft's
+ONNX Runtime Web 1.20.1 (MIT). The model contains a constant-Q transform from nnAudio (MIT). Their unmodified files,
+licences and notices are in `third_party/`; `PROVENANCE.md` in `third_party/basic-pitch/` and
+`third_party/onnxruntime-web/` says where the files come from and gives their SHA-256. `web/m1d1.html` embeds the
+model and the runtime gzipped and base64-encoded: `web/src/make-plugin-page.py` builds those
+blocks from `third_party/` and checks each file's SHA-256. `THIRD_PARTY_NOTICES.txt` lists every third-party part
+with its version, licence, copyright and where its full licence text is (the Apache License is in
+`licenses/Apache-2.0.txt`). The Windows download carries `LICENSE`, `THIRD_PARTY_NOTICES.txt` and these licence
+files in its `licenses` folder.

@@ -1,0 +1,246 @@
+M1D1 - THIRD-PARTY NOTICES
+==========================
+
+M1D1 is free software under the GNU Affero General Public License version 3 (the file LICENSE).
+Its source code is at https://github.com/AhmedMasum2000000/Wingman; each release is tagged there as
+v<version> (the version is in version.txt next to M1D1.exe).
+
+M1D1 contains the third-party parts listed below. Each part stays under its own licence. Licence texts
+are given in full below, or at a path that exists both in the source repository and in the M1D1 folder
+of the M1D1-Windows.zip download (the download keeps them under licenses\).
+
+  1. Basic Pitch (Spotify)                 Apache License 2.0
+  2. nnAudio                               MIT
+  3. ONNX Runtime Web 1.20.1 (Microsoft)   MIT, and the libraries inside its WebAssembly module
+  4. JUCE 8.0.4                            GNU AGPL v3 (JUCE's open-source option)
+  5. Microsoft WebView2 SDK 1.0.1901.177   BSD-style licence (Microsoft)
+  6. Fonts                                 SIL Open Font License 1.1
+
+None of these projects or their owners endorse M1D1. Their names are used here only to say where the
+parts come from.
+
+
+1. BASIC PITCH
+--------------
+
+What:       Spotify's note-transcription model (the "ICASSP 2022" weights, nmp.onnx), embedded unmodified in
+            M1D1's window (web/m1d1.html), where it reads the notes in your audio. M1D1's note reader
+            (m1d1-pitch.js) also contains code ported from Basic Pitch's basic_pitch/inference.py; that file
+            keeps Spotify's Apache-2.0 header and states what M1D1 changed.
+Version:    spotify/basic-pitch, commit fa5997af0a8210982619003269994a1be25eddf3
+Licence:    Apache License, Version 2.0
+Copyright:  Copyright 2022 Spotify AB
+Full text:  licenses/Apache-2.0.txt
+            Spotify's own copy: repository third_party/basic-pitch/LICENSE, download licenses/basic-pitch/LICENSE
+Source:     https://github.com/spotify/basic-pitch/tree/fa5997af0a8210982619003269994a1be25eddf3
+            (file path, size and SHA-256 of nmp.onnx: third_party/basic-pitch/PROVENANCE.md)
+
+Basic Pitch's NOTICE file, word for word (repository third_party/basic-pitch/NOTICE, download
+licenses/basic-pitch/NOTICE):
+
+----- begin Basic Pitch NOTICE -----
+Basic Pitch
+Copyright 2022 Spotify AB
+
+This product includes software developed at
+Spotify AB (http://www.spotify.com/).
+
+This product includes software from Librosa (ISC).
+* Copyright (C) 2013--2017, librosa development team.
+
+This product includes software from mir_eval (MIT)
+* Copyright (C) 2014 Colin Raffel
+
+This product includes software from numpy (BSD)
+* Copyright (C) 2005-2022, NumPy Developers.
+
+This product includes software from pretty-midi (MIT)
+* Copyright (C) 2014 Colin Raffel
+
+This product includes software from resampy (ISC)
+* Copyright (C) 2016, Brian McFee
+
+This product includes software from scipy (BSD)
+* Copyright (C) 2001-2002 Enthought, Inc. 2003-2022, SciPy Developers
+
+This product includes software from tensorflow (Apache 2.0)
+* Copyright (C) 2019 Google, LLC <packages@tensorflow.org>
+
+The tests for `basic-pitch` include audio files from the
+Vocadito dataset liscened under Creative Commons
+Attribution 4.0 International. The dataset can be found at:
+https://zenodo.org/record/5578807#.YnRm5vPMKDU
+----- end Basic Pitch NOTICE -----
+
+Training data: Spotify publishes the trained weights under the Apache License 2.0 and states no other
+terms for them. Basic Pitch's training code prepares five datasets (GuitarSet, iKala, MAESTRO,
+MedleyDB-Pitch and Slakh). Some of these datasets are published under their own terms, and some of those
+terms are non-commercial or for research only. M1D1 uses the weights under their Apache-2.0 licence and
+contains no training data. This note describes where the model comes from; it is not legal advice.
+
+
+2. NNAUDIO
+----------
+
+What:       The constant-Q transform layer of the Basic Pitch model. Basic Pitch ported it from nnAudio
+            (basic_pitch/layers/nnaudio.py), and its kernels are part of nmp.onnx.
+Licence:    MIT
+Copyright:  Copyright (c) 2019 KinWaiCheuk
+Source:     https://github.com/KinWaiCheuk/nnAudio
+Full text:  below; also repository third_party/nnAudio/LICENSE, download licenses/nnAudio/LICENSE
+
+----- begin nnAudio LICENSE -----
+MIT License
+
+Copyright (c) 2019 KinWaiCheuk
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+----- end nnAudio LICENSE -----
+
+
+3. ONNX RUNTIME WEB 1.20.1
+--------------------------
+
+What:       Microsoft's runtime that runs the Basic Pitch model inside M1D1's window: ort.wasm.min.js,
+            ort-wasm-simd-threaded.mjs and ort-wasm-simd-threaded.wasm, embedded unmodified in web/m1d1.html.
+Version:    npm package onnxruntime-web 1.20.1, built from microsoft/onnxruntime tag v1.20.1
+Licence:    MIT
+Copyright:  Copyright (c) Microsoft Corporation
+Full text:  below; also repository third_party/onnxruntime-web/LICENSE, download licenses/onnxruntime-web/LICENSE
+Source:     https://github.com/microsoft/onnxruntime/tree/v1.20.1 (JavaScript: js/common and js/web;
+            C++: onnxruntime/ and include/; build: tools/ci_build/build.py --build_wasm)
+            (package, sizes and SHA-256 of each file: third_party/onnxruntime-web/PROVENANCE.md)
+
+----- begin ONNX Runtime LICENSE -----
+MIT License
+
+Copyright (c) Microsoft Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+----- end ONNX Runtime LICENSE -----
+
+Libraries inside the WebAssembly module (ort-wasm-simd-threaded.wasm). Their licence texts are in ONNX
+Runtime's own notices file for this version: repository third_party/onnxruntime-web/ThirdPartyNotices.txt,
+download licenses/onnxruntime-web/ThirdPartyNotices.txt, under the heading given in brackets. That file
+covers every build of ONNX Runtime; of the libraries it lists, this module contains:
+
+  Eigen                     MPL-2.0         ["Eigen"]
+  Protocol Buffers (lite)   BSD-3-Clause    ["protocolbuffers/protobuf"]   Copyright 2008 Google Inc.
+  Abseil                    Apache-2.0      ["abseil-cpp"]
+  ONNX                      Apache-2.0      ["onnx"]
+  RE2                       BSD-3-Clause    ["google/re2"]                 Copyright (c) 2009 The RE2 Authors
+  FlatBuffers               Apache-2.0      ["google/flatbuffers"]
+  SafeInt                   MIT             ["dcleblanc/SafeInt"]          Copyright (c) 2018 Microsoft
+  nlohmann/json             MIT             ["nlohmann/json"]              Copyright (c) 2013-2019 Niels Lohmann
+  Microsoft GSL             MIT             ["Microsoft GSL"]              Copyright (c) 2015 Microsoft Corporation
+  HowardHinnant/date        MIT             ["HowardHinnant/date"]
+  Boost.Mp11, dlib          BSL-1.0         ["Boost"]
+  Emscripten runtime        MIT             ["emsdk"]                      Copyright (c) 2018 Emscripten authors
+
+The exact versions (from cmake/deps.txt at tag v1.20.1, which also gives each source archive's URL and
+SHA-1) are in third_party/onnxruntime-web/PROVENANCE.md.
+
+Eigen, Mozilla Public License 2.0: M1D1 does not change Eigen. Its source code, in the version compiled
+into this module, is at
+  https://gitlab.com/libeigen/eigen/-/archive/e7248b26a1ed53fa030c5c459f7ea095dfd276ac/eigen-e7248b26a1ed53fa030c5c459f7ea095dfd276ac.zip
+The MPL-2.0 text is in ThirdPartyNotices.txt under "Eigen" and at https://mozilla.org/MPL/2.0/.
+
+
+4. JUCE
+-------
+
+What:       The framework M1D1's plugin and app are built with.
+Version:    JUCE 8.0.4 (https://github.com/juce-framework/JUCE, tag 8.0.4)
+Licence:    GNU Affero General Public License v3, the open-source option of JUCE's dual licence (the
+            same licence as M1D1, in LICENSE)
+Note:       JUCE's modules contain libraries under their own licences (among them the VST3 SDK, used under
+            its GPLv3 option, HarfBuzz, SheenBidi, zlib, pnglib, jpeglib, FLAC and Ogg Vorbis). JUCE lists
+            them, with links to their licence texts, in LICENSE.md at tag 8.0.4:
+            https://github.com/juce-framework/JUCE/blob/8.0.4/LICENSE.md
+
+
+5. MICROSOFT WEBVIEW2 SDK
+-------------------------
+
+What:       M1D1's window is a WebView2 page. The Windows plugin and app link the WebView2 loader from
+            Microsoft's SDK statically. The WebView2 Runtime itself comes with Windows and is not part of M1D1.
+Version:    NuGet package Microsoft.Web.WebView2 1.0.1901.177
+Licence:    BSD-style licence, reproduced here from the package's LICENSE.txt
+
+----- begin WebView2 SDK LICENSE.txt -----
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * The name of Microsoft Corporation, or the names of its contributors
+may not be used to endorse or promote products derived from this
+software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+----- end WebView2 SDK LICENSE.txt -----
+
+
+6. FONTS
+--------
+
+Licence:    SIL Open Font License, Version 1.1 (https://openfontlicense.org). Each font file carries its
+            copyright notice and a link to the licence in its own metadata.
+
+In the plugin and app (assets/):
+  Space Grotesk 2.000   Copyright 2020 The Space Grotesk Project Authors (https://github.com/floriankarsten/space-grotesk)
+  Inter 4.001           Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter)
+
+In M1D1's window (embedded in web/m1d1.html):
+  Archivo 2.001         Copyright 2020 The Archivo Project Authors (https://github.com/Omnibus-Type/Archivo)
+  Inter 4.001           Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter)
+  Rubik Dirt 2.200      Copyright 2020 The Rubik Filtered Project Authors (https://github.com/NaN-xyz/Rubik-Filtered)

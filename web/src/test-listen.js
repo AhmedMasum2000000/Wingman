@@ -306,5 +306,80 @@ if (!onlyArg) {
     if (verbose) console.log('  borrowed:', JSON.stringify(r.spec), r.notes);
   }
 }
+
+// ---------- note evidence from a transcriber (opts.notes) ----------
+// Two small fixtures (fixtures/notes-*.json + .bin.gz) hold Basic Pitch's note activations, so these checks need
+// neither Python nor onnxruntime: 16 beats of a test-corpus song with distorted guitars (G mixolydian, G F C G, as the
+// plugin captures it, halved to 11025 Hz), and a synthetic drum loop (the audio is made here; the fixture holds its sha1).
+if (!onlyArg || onlyArg === 'notes') {
+  const fs = require('fs'), zlib = require('zlib'), crypto = require('crypto');
+  const sha1 = b => crypto.createHash('sha1').update(b).digest('hex');
+  const fixture = name => {
+    const meta = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', name + '.json'), 'utf8'));
+    const bin = zlib.gunzipSync(fs.readFileSync(path.join(__dirname, 'fixtures', meta.bin)));
+    if (sha1(bin) !== meta.binSha1) throw new Error(`fixtures/${meta.bin} is not the file ${name}.json describes`);
+    const u8 = Uint8Array.from(bin.subarray(bin.length - meta.frames * meta.keys));
+    return { meta, bin, notes: { note: Float32Array.from(u8, v => v / 255), times: Float64Array.from(meta.times), keys: meta.keys, midi0: meta.midi0 } };
+  };
+  const stripped = (r, ref) => { const extra = r.notes.filter(s => !ref.notes.includes(s)); return { extra, rest: JSON.stringify(Object.assign({}, r, { notes: r.notes.filter(s => ref.notes.includes(s)) })) }; };
+
+  const { meta: fx, bin, notes } = fixture('notes-x01');
+  const i16 = new Int16Array(Uint8Array.from(bin.subarray(0, 2 * fx.samples)).buffer), x = Float32Array.from(i16, v => v / 32767);
+  const opts = { gen: Gen, grid: fx.grid };
+  const plain = Listen.analyse(x, fx.sr, opts), heard = Listen.analyse(x, fx.sr, Object.assign({ notes }, opts));
+  checkShape(plain, 'x01 4 bars'); checkShape(heard, 'x01 4 bars with notes');
+  check(!heard.notes.some(s => /could not be used/.test(s)), `notes: a good transcription is used (${heard.notes.join(' | ')})`);
+  check(JSON.stringify(Listen.analyse(x, fx.sr, Object.assign({ notes }, opts))) === JSON.stringify(heard), 'notes: the same audio and notes give the same answer twice');
+  const rows = []; for (let k = 0; k < fx.frames; k++) rows.push(Array.from(notes.note.subarray(k * 88, (k + 1) * 88)));
+  check(JSON.stringify(Listen.analyse(x, fx.sr, Object.assign({ notes: { note: rows, times: Array.from(notes.times) } }, opts))) === JSON.stringify(heard), 'notes: [frames][88] arrays read the same as a flat Float32Array');
+  // what the notes are for: the guitars' overtones read as sevenths in the spectrum; the transcription hears the triads
+  const want = [...new Array(8).fill([7, '2,7,11']), ...new Array(4).fill([5, '0,5,9']), ...new Array(4).fill([0, '0,4,7'])];
+  const fullOf = r => expand(r.spec, keyOf(r.key.root, r.key.scaleIdx)).filter((g, b) => g.root === want[b][0] && g.set === want[b][1] && g.bass === want[b][0]).length;
+  check(fullOf(heard) === 16, `notes: x01 reads G F C as plain triads with the notes (${fullOf(heard)}/16 full, ${JSON.stringify(heard.spec)}; the spectrum alone ${fullOf(plain)}/16)`);
+  check(heard.pitched === true && heard.oneNote === false && plain.pitched === true, 'notes: x01 has chords with and without the notes');
+  if (verbose) console.log(`  notes: x01 alone ${JSON.stringify(plain.spec)} ${fullOf(plain)}/16, with notes ${JSON.stringify(heard.spec)} ${fullOf(heard)}/16`);
+  // without a grid (a file opened in the page) the notes are read on the analyser's own beats
+  const freeHeard = Listen.analyse(x, fx.sr, { gen: Gen, notes });
+  checkShape(freeHeard, 'x01 4 bars, no grid, with notes');
+  check(!freeHeard.notes.some(s => /could not be used/.test(s)) && Math.abs(freeHeard.bpm - fx.grid.bpm) <= 1, `notes: without a grid the notes are used too (${freeHeard.bpm} BPM, ${freeHeard.notes.join(' | ')})`);
+
+  // nothing given: exactly the spectrum's reading; a transcription that hears nothing changes nothing either
+  for (const none of [undefined, null, false]) check(JSON.stringify(Listen.analyse(x, fx.sr, Object.assign({ notes: none }, opts))) === JSON.stringify(plain), `notes: notes ${none} reads the spectrum alone`);
+  check(JSON.stringify(Listen.analyse(x, fx.sr, Object.assign({ notes: { note: new Float32Array(notes.note.length), times: notes.times } }, opts))) === JSON.stringify(plain), 'notes: a transcription that hears nothing changes nothing');
+  // broken transcriptions never throw: the spectrum is read alone and one note says why
+  const sprinkled = Float32Array.from(notes.note); for (let i = 0; i < sprinkled.length; i += 7) sprinkled[i] = NaN;
+  const broken = {
+    'not an object': 'notes', 'no activations': { times: notes.times }, 'no frame times': { note: notes.note },
+    'empty': { note: new Float32Array(0), times: new Float64Array(0) }, 'empty rows': { note: [], times: [] },
+    'frame times one short': { note: notes.note, times: notes.times.subarray(1) }, 'not whole frames': { note: notes.note.subarray(1), times: notes.times },
+    'times in milliseconds': { note: notes.note, times: notes.times.map(t => t * 1000) }, 'times in frames': { note: notes.note, times: notes.times.map((t, k) => k) },
+    'times out of order': { note: notes.note, times: notes.times.slice().reverse() }, 'a NaN time': { note: notes.note, times: notes.times.map((t, k) => (k === 9 ? NaN : t)) },
+    'rows of 87 keys': { note: rows.map(r => r.slice(1)), times: notes.times, keys: 88 }, 'keys 0': { note: notes.note, times: notes.times, keys: 0 },
+    'all NaN': { note: new Float32Array(notes.note.length).fill(NaN), times: notes.times }, 'NaN every 7th value': { note: sprinkled, times: notes.times },
+    'activations above 1': { note: notes.note.map(v => 2 * v), times: notes.times }, 'midi0 120': { note: notes.note, times: notes.times, midi0: 120 },
+  };
+  for (const [name, bad] of Object.entries(broken)) {
+    let r; try { r = Listen.analyse(x, fx.sr, Object.assign({ notes: bad }, opts)); } catch (e) { check(false, `notes: ${name} threw ${e.message}`); continue; }
+    const { extra, rest } = stripped(r, plain);
+    check(rest === JSON.stringify(plain) && extra.length === 1 && /^the note transcription could not be used: /.test(extra[0]), `notes: ${name} reads the spectrum alone and says why (${extra.join(' | ')})`);
+    if (verbose) console.log(`  notes: ${name}: ${extra.join(' | ')}`);
+  }
+
+  // drums only: the transcription does not turn a drum loop into chords (the drums-only test is the spectrum's own)
+  const { meta: fd, notes: drumNotes } = fixture('notes-drums');
+  const bpm = fd.bpm, sr = fd.sr, beat = 60 / bpm, n = Math.ceil(fd.beats * beat * sr), d = new Float32Array(n);
+  let seed = bpm * 7919 % 2147483647 || 1; const rnd = () => ((seed = seed * 16807 % 2147483647) / 2147483647) * 2 - 1;
+  for (let b = 0; b < fd.beats; b++) {
+    const t0 = b * beat, i0 = Math.round(t0 * sr);
+    for (let i = 0; i < 0.25 * sr && i0 + i < n; i++) { const t = i / sr; d[i0 + i] += 0.7 * Math.sin(2 * Math.PI * (45 + 120 * Math.exp(-t * 25)) * t) * Math.exp(-t * 12); }
+    if (b % 2 === 1) for (let i = 0; i < 0.18 * sr && i0 + i < n; i++) { const t = i / sr; d[i0 + i] += 0.35 * (rnd() * 0.8 + 0.3 * Math.sin(2 * Math.PI * 190 * t)) * Math.exp(-t * 22); }
+    for (let h = 0; h < 4; h++) { const j0 = Math.round((t0 + h * beat / 4) * sr); for (let i = 0; i < 0.05 * sr && j0 + i < n; i++) d[j0 + i] += 0.12 * rnd() * Math.exp(-i / sr * 80); }
+  }
+  check(sha1(Buffer.from(d.buffer)) === fd.audioSha1, 'notes: the drum loop is the audio the drums fixture was transcribed from');
+  const dOpts = { gen: Gen, grid: { bpm, firstBeatSec: 0, startBeat: 0, beatsPerBar: 4 } };
+  const dPlain = Listen.analyse(d, sr, dOpts), dHeard = Listen.analyse(d, sr, Object.assign({ notes: drumNotes }, dOpts));
+  check(dPlain.pitched === false && dHeard.pitched === false, `notes: a drum loop is drums only, with or without the notes (${dPlain.pitched}, ${dHeard.pitched})`);
+  check(JSON.stringify(dHeard) === JSON.stringify(dPlain), 'notes: for drums only the transcription changes nothing');
+}
 console.log(failures ? `\n${failures} FAILED` : '\nall assertions passed');
 process.exit(failures ? 1 : 0);

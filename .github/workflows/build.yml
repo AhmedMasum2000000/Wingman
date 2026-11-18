@@ -87,6 +87,15 @@ jobs:
           cp -r build/Backline_artefacts/Release/VST3/M1D1.vst3 dist/M1D1/
           cp build/Backline_artefacts/Release/Standalone/M1D1.exe dist/M1D1/
           cp installer/Install.bat installer/Uninstall.bat installer/README.txt dist/M1D1/
+          # the licences: M1D1's own, the third-party notices, and the licence and notice files from third_party/
+          # (not its model or runtime files, which are inside the plugin and the app)
+          cp LICENSE THIRD_PARTY_NOTICES.txt dist/M1D1/
+          mkdir -p dist/M1D1/licenses
+          cp -r licenses/. dist/M1D1/licenses/
+          for f in basic-pitch/LICENSE basic-pitch/NOTICE nnAudio/LICENSE onnxruntime-web/LICENSE onnxruntime-web/ThirdPartyNotices.txt; do
+            mkdir -p "dist/M1D1/licenses/$(dirname "$f")"
+            cp "third_party/$f" "dist/M1D1/licenses/$f"
+          done
           printf '%s\r\n' "$version" > dist/M1D1/version.txt
           cd dist && 7z a -tzip ../M1D1-Windows.zip M1D1 > /dev/null
 
