@@ -4612,6 +4612,12 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     drawWheel(stage2 ? 1 : 0); waveDirty = rollsDirty = true; syncTools();
   }
   let runId = 0;
+  // Reading audio takes a while (the notes are read in a Worker), so every read takes a ticket from readGen, and
+  // anything that replaces what is shown (a file opened, the example, Reset, a mode change, a newer read) moves readGen
+  // on. After each wait a read checks its ticket: a read that is no longer the latest is dropped without a word and
+  // leaves the page as the newer action set it. liveRead: the ticket of the read in flight (0: none).
+  let readGen = 0, liveRead = 0;
+  const readInFlight = () => liveRead !== 0 && liveRead === readGen;
   function run() {
     stopParts(); const id = ++runId; stage1 = true; stage2 = stage3 = stage4 = false; reveal = 0; wReveal = 0; revealing = true; scanning = false;
     setStage(1, true); setStage(2, false); setStage(3, false); setStage(4, false); syncStates();
@@ -4637,9 +4643,9 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     [1, 2, 3, 4].forEach(n => setStage(n, ready)); overview = null; offset = 0; reveal = 0; wReveal = 0; revealing = true;
     renderChords(true); syncStates(); ui(); react(m === 'generate' ? 'wink' : 'curious', 1.3, 'nod');
   }
-  $$('.modesw button').forEach(b => b.addEventListener('click', () => { setMode(b.dataset.mode); if (HOST && typeof hostModeChanged === 'function') hostModeChanged(); }));
+  $$('.modesw button').forEach(b => b.addEventListener('click', () => { if (b.dataset.mode !== mode) readGen++; setMode(b.dataset.mode); if (HOST && typeof hostModeChanged === 'function') hostModeChanged(); }));
   function clearAll() {
-    sessionNote = ''; sessionName = ''; runId++; stopAll(); offset = 0; exampleOn = false; hasAudio = mode === 'generate'; isExample = mode === 'generate'; buffer = null; heard = null; detected.root = 9; detected.scale = 0; overview = null; stage1 = stage2 = stage3 = stage4 = false; scanning = false;
+    readGen++; sessionNote = ''; sessionName = ''; runId++; stopAll(); offset = 0; exampleOn = false; hasAudio = mode === 'generate'; isExample = mode === 'generate'; buffer = null; heard = null; detected.root = 9; detected.scale = 0; overview = null; stage1 = stage2 = stage3 = stage4 = false; scanning = false;
     [1, 2, 3, 4].forEach(n => setStage(n, false));
     $('#fileName').textContent = 'No audio'; $('#exampleChip').hidden = true; $('#hint').hidden = false; $('#timeNow').textContent = '0:00';
     spec = SPECS[0]; setIdx = 0; history = []; PT = freshPT(); keyRoot = detected.root; scaleIdx = detected.scale; rebuild(); knobs.forEach(k => { if (k.steps) k.sync(); }); $('#btnUndo').disabled = true; knobs.forEach(k => k.set(k.def, true)); setTempo(124); T.x.t = 124;
@@ -4650,11 +4656,12 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   // Note reading: Spotify's Basic Pitch (nmp.onnx, Apache-2.0) run by onnxruntime-web 1.20.1 (MIT, wasm, one thread)
   // in a Web Worker, made on the first read from the blocks at the end of the page (m1d1-pitch.js and the runtime,
   // gzip + base64). Pitch.run(mono, rate) gives the analyser's opts.notes, or null when the reader is missing, fails
-  // or takes longer than 20 s: the chords are then read from the spectrum alone, as without it. One run at a time.
+  // or takes longer than 20 s: the chords are then read from the spectrum alone, as without it. One run at a time;
+  // Pitch.run(mono, rate, wanted) asks wanted() when its turn comes, and a read dropped meanwhile gives up its turn.
   const Pitch = (() => {
     const TIMEOUT = 20000, MAX_SEC = 64;
     let worker = null, wurl = '', off = '', strikes = 0, seq = 0, cur = null, queue = Promise.resolve();
-    const stats = { runs: 0, ok: 0, init: null, last: null };
+    const stats = { runs: 0, ok: 0, skipped: 0, init: null, last: null };
     const block = id => { const e = document.getElementById(id), s = e ? e.textContent.trim() : ''; return s.includes('@@') ? '' : s; };
     function make() {
       const src = block('m1d1-pitch-src'), data = { ort: block('bp-ort-js'), mjs: block('bp-ort-mjs'), wasm: block('bp-ort-wasm'), model: block('bp-model') };
@@ -4683,9 +4690,9 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
       const a = f32.slice(0, Math.min(f32.length, Math.floor(MAX_SEC * sr)));
       try { worker.postMessage({ type: 'run', id, audio: a, sr }, [a.buffer]); } catch (e) { drop(String(e)); end(null, String(e)); }
     });
-    const run = (f32, sr) => {
+    const run = (f32, sr, wanted) => {
       if (!f32 || !f32.length || !(sr > 0)) return Promise.resolve(null);
-      const p = queue.then(() => once(f32, sr)).catch(() => null);
+      const p = queue.then(() => { if (wanted && !wanted()) { stats.skipped++; return null; } return once(f32, sr); }).catch(() => null);
       queue = p; return p;
     };
     return { run, stats, get off() { return off; } };
@@ -4697,10 +4704,10 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     for (let c = 0; c < chs; c++) { const d = buf.getChannelData(c); for (let i = 0; i < n; i++) mono[i] += d[i] / chs; }
     return mono;
   };
-  // listen to the file: up to a minute of it, mixed to mono
-  function listenTo(buf, extra, pre) {
+  // listen to the file: up to a minute of it, mixed to mono (monoIn: that mix, when the caller already made it)
+  function listenTo(buf, extra, pre, monoIn) {
     sessionNote = '';
-    const mono = pre ? null : fileMono(buf);
+    const mono = pre ? null : monoIn || fileMono(buf);
     let res = pre || null; if (!res) try { res = M1D1Listen.analyse(mono, buf.sampleRate, { gen: M1D1Gen, ...(extra || {}) }); } catch (e) { res = null; }
     const chip = $('#exampleChip'); chip.hidden = false;
     if (!res || !res.spec || !res.spec.length) { heard = null; chip.textContent = 'Could not analyse this audio'; chip.title = 'The chords shown are an example, not read from this file.'; return false; }
@@ -4716,13 +4723,20 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   }
   async function loadFile(f) {
     if (!f) return; audio(); pause();
+    // this read's ticket: another file, the example, Reset or a mode change meanwhile drops it (see readGen). The
+    // file's audio stays in this read until its chords are in: what is shown does not change before then.
+    const tok = ++readGen, hadChords = stage4 || exampleOn || !!heard || mode === 'generate'; liveRead = tok;
     try {
-      const hadChords = stage4 || exampleOn || !!heard || mode === 'generate';
-      buffer = await ctx.decodeAudioData(await f.arrayBuffer()); if (mode === 'generate') setMode('extract'); hasAudio = true; isExample = false; offset = 0; overview = null; $('#hint').hidden = true;
-      fileName = f.name.replace(/\.[^.]+$/, ''); $('#fileName').textContent = `${fileName.slice(0, 28)} · reading the notes…`;
-      const notes = await Pitch.run(fileMono(buffer), buffer.sampleRate);   // null: the spectrum alone reads the chords
-      $('#fileName').textContent = fileName.slice(0, 40);
-      const fileTempoBefore = tempo, ok = listenTo(buffer, notes ? { notes } : undefined);
+      const buf = await ctx.decodeAudioData(await f.arrayBuffer());
+      if (tok !== readGen) return;
+      const name = f.name.replace(/\.[^.]+$/, ''), mono = fileMono(buf);
+      $('#fileName').textContent = `${name.slice(0, 28)} · reading the notes…`;
+      // the notes of this file's own audio; null: the spectrum alone reads the chords
+      const notes = await Pitch.run(mono, buf.sampleRate, () => tok === readGen);
+      if (tok !== readGen) return;
+      buffer = buf; if (mode === 'generate') setMode('extract'); hasAudio = true; isExample = false; offset = 0; overview = null; $('#hint').hidden = true;
+      fileName = name; $('#fileName').textContent = fileName.slice(0, 40);
+      const fileTempoBefore = tempo, ok = listenTo(buf, notes ? { notes } : undefined, null, mono);
       if (!ok && !hadChords) {
         buffer = null; hasAudio = false; $('#hint').hidden = false; $('#exampleChip').hidden = true;
         $('#fileName').textContent = `${fileName.slice(0, 28)} · no chords heard in it (drums only?)`; ui(); return;
@@ -4731,7 +4745,8 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
       if (HOST && ok && heard && Math.abs(heard.bpm / fileTempoBefore - 1) > 0.01 && hostRun !== undefined)
         $('#fileName').textContent = `${fileName.slice(0, 28)} · ${heard.bpm} BPM: the parts play at FL Studio's tempo, from bar 1`;
       ui(); run(); play();
-    } catch (e) { react('puffed', 2.5); $('#fileName').textContent = 'That file could not be read. Try WAV, MP3 or OGG.'; }
+    } catch (e) { if (tok === readGen) { react('puffed', 2.5); $('#fileName').textContent = 'That file could not be read. Try WAV, MP3 or OGG.'; } }
+    finally { if (liveRead === tok) liveRead = 0; }
   }
   $('#btnOpen').addEventListener('click', () => $('#fileIn').click());
   $('#fileIn').addEventListener('change', e => loadFile(e.target.files[0]));
@@ -4775,7 +4790,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   $('#portOk').addEventListener('click', closeDialogs);
   $$('.overlay').forEach(o => o.addEventListener('click', e => { if (e.target === o) closeDialogs(); }));
   addEventListener('keydown', e => { if (e.key === 'Escape') closeDialogs(); });
-  $('#btnExample').addEventListener('click', () => { sessionNote = ''; sessionName = ''; exampleOn = true; isExample = true; hasAudio = true; buffer = null; heard = null; detected.root = 9; detected.scale = 0; overview = null; $('#hint').hidden = true; $('#fileName').textContent = 'Example loop'; $('#exampleChip').hidden = false; $('#exampleChip').textContent = 'Example'; run(); });
+  $('#btnExample').addEventListener('click', () => { readGen++; sessionNote = ''; sessionName = ''; exampleOn = true; isExample = true; hasAudio = true; buffer = null; heard = null; detected.root = 9; detected.scale = 0; overview = null; $('#hint').hidden = true; $('#fileName').textContent = 'Example loop'; $('#exampleChip').hidden = false; $('#exampleChip').textContent = 'Example'; run(); });
 
   function ui() {
     const b = $('#playBtn'), snd = anyOn(); b.setAttribute('aria-pressed', String(snd)); b.setAttribute('aria-label', snd ? 'Stop (Space)' : 'Play (Space)'); b.title = snd ? 'Stop (Space)' : mode === 'generate' ? 'Play the three parts (Space)' : 'Play your audio (Space)';
@@ -5367,7 +5382,7 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     // file, load the example or switch to Generate). The first time the DAW plays, it listens to the track on its own.
     let waitingForTrack = false;
     // heardBeats: song beats the DAW has played since M1D1 opened (from its transport reports)
-    let rereads = 0, lastReadAt = 0, busy = false, heardBeats = 0, lastHostBeat = null, nextTry = 0, noChordsYet = false, lastReadSig = '', readUserSig = null, notBefore = 0;
+    let rereads = 0, lastReadAt = 0, heardBeats = 0, lastHostBeat = null, nextTry = 0, noChordsYet = false, lastReadSig = '', readUserSig = null, notBefore = 0;
     const hintText = $('#hint span');
     // fromReset: what the track played before Reset is not what you want read again, so it waits for 4 new bars
     const startEmpty = fromReset => {
@@ -5427,81 +5442,109 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
     tb.title = 'Read the key, tempo and chords from the audio on this track. Play your project for a few bars first.';
     tb.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 8h2l1.5-4 2 8 2-10 2 9 1.5-3h2"/></svg>Listen to track';
     $('#btnOpen').after(tb);
+    // what you changed by hand since the last read: a change ends the re-reads (your edit stays)
+    const userSig = () => JSON.stringify([spec, keyRoot, scaleIdx, setIdx, PT, knobs.map(k => k.v), midiParts]);
     // read the chords from the track, on the host's own grid: its tempo, and the song beat the audio starts on,
-    // so the parts M1D1 plays line up with the song's bars
+    // so the parts M1D1 plays line up with the song's bars.
+    // Each read takes a ticket (see readGen): a newer read, a file, the example, Reset or a mode change meanwhile drops
+    // it ('stale': it changes nothing). A read on its own ('again') also gives way to any change you make by hand while
+    // it waits. The audio, the grid and the notes stay in the read, so analyse() always gets the audio the notes are of.
+    let labelBefore = '';
     async function listenToTrack(quiet) {
-      const r = await call('getTrackAudio');
-      if (!r || !r.b64) { if (!quiet) { $('#fileName').textContent = 'Play your project for a few bars, then press Listen to track'; react('thinking', 2); } return false; }
-      if (!(r.level > 1e-4)) { $('#fileName').textContent = 'M1D1 hears nothing on this track: put it on the mixer insert your audio plays through'; react('pout', 2); return false; }
-      const f32of = s => { const bin = atob(s), u8 = new Uint8Array(bin.length); for (let k = 0; k < bin.length; k++) u8[k] = bin.charCodeAt(k); return new Float32Array(u8.buffer); };
-      const f32 = f32of(r.b64), side = r.side ? f32of(r.side) : null; audio();
-      const buf = ctx.createBuffer(1, f32.length, r.sr); buf.copyToChannel(f32, 0);
-      if (mode === 'generate') setMode('extract');
-      // in 7/8 a bar can start half-way through a beat: the first whole beat comes that much later
-      const firstWhole = Math.ceil(r.startBeat - 1e-6), gridOf = { bpm: r.bpm, firstBeatSec: Math.max(0, firstWhole - r.startBeat) * 60 / r.bpm, startBeat: r.startBeat, beatsPerBar: r.beatsPerBar, segments: r.segments };
-      const opts = { grid: gridOf, side };
-      // the notes (Basic Pitch, in its Worker) on the mid channel; null: the spectrum alone reads the chords
-      const lab = $('#fileName'), was = lab.textContent, reading = 'Reading the notes…';
-      lab.textContent = reading;
-      const notes = await Pitch.run(f32, r.sr);
-      if (lab.textContent === reading) lab.textContent = was;
-      if (notes) opts.notes = notes;
-      let res = null; try { res = M1D1Listen.analyse(f32, r.sr, { gen: M1D1Gen, ...opts }); } catch (e) { res = null; }
-      if (!res || res.pitched === false || (quiet && res.oneNote)) {
-        // listening on its own keeps waiting (an intro of drums only), or keeps the chords it already shows;
-        // a press says what was heard
-        if (quiet === 'again') return false;
-        if (quiet) { waitingForTrack = true; return false; }
-        $('#fileName').textContent = 'No chords heard on this track: is it drums only? Put M1D1 on a track with chords or bass';
-        react('thinking', 2); return false;
-      }
-      // listening again on its own: nothing to do while what it hears has not changed
-      const sig = JSON.stringify([res.spec, res.key.root, res.key.scaleIdx]);
-      if (quiet === 'again' && sig === lastReadSig) return 'same';
-      lastReadSig = sig; readUserSig = null;
-      listenTo(buf, opts, res);
-      pause(); buffer = buf; hasAudio = true; isExample = false; offset = 0; overview = null; $('#hint').hidden = true;
-      fileName = 'Your track'; waitingForTrack = false; noChordsYet = false;
-      const warn = res.notes.find(n => /not the project|less than .* bars were heard|seems longer than/.test(n));
-      $('#fileName').textContent = warn ? warn[0].toUpperCase() + warn.slice(1) : `Your track · ${Math.round(r.secs * r.bpm / 60 / r.beatsPerBar)} bars heard`;
-      lastReadAt = heardBeats;
-      // a read again on its own updates the chords in place (no new reveal, no gap in the MIDI)
-      if (quiet === 'again') { renderChords(true); applyDetail(true); changed([0, 1, 2]); syncStates(); ui(); }
-      else { ui(); run(); }
-      return true;
+      const tok = ++readGen, sig0 = quiet === 'again' ? userSig() : null; liveRead = tok;
+      const stale = () => tok !== readGen || (sig0 !== null && userSig() !== sig0);
+      try {
+        const r = await call('getTrackAudio');
+        if (stale()) return 'stale';
+        if (!r || !r.b64) { if (!quiet) { $('#fileName').textContent = 'Play your project for a few bars, then press Listen to track'; react('thinking', 2); } return false; }
+        if (!(r.level > 1e-4)) { $('#fileName').textContent = 'M1D1 hears nothing on this track: put it on the mixer insert your audio plays through'; react('pout', 2); return false; }
+        const f32of = s => { const bin = atob(s), u8 = new Uint8Array(bin.length); for (let k = 0; k < bin.length; k++) u8[k] = bin.charCodeAt(k); return new Float32Array(u8.buffer); };
+        const f32 = f32of(r.b64), side = r.side ? f32of(r.side) : null; audio();
+        // in 7/8 a bar can start half-way through a beat: the first whole beat comes that much later
+        const firstWhole = Math.ceil(r.startBeat - 1e-6), gridOf = { bpm: r.bpm, firstBeatSec: Math.max(0, firstWhole - r.startBeat) * 60 / r.bpm, startBeat: r.startBeat, beatsPerBar: r.beatsPerBar, segments: r.segments };
+        const opts = { grid: gridOf, side };
+        // the notes (Basic Pitch, in its Worker) on the mid channel; null: the spectrum alone reads the chords.
+        // The label says so meanwhile, and goes back after unless something newer has taken it.
+        const lab = $('#fileName'), readingTxt = 'Reading the notes…', was = lab.textContent === readingTxt ? labelBefore : lab.textContent;
+        labelBefore = was; lab.textContent = readingTxt;
+        const notes = await Pitch.run(f32, r.sr, () => !stale());
+        if (tok === readGen && lab.textContent === readingTxt) lab.textContent = was;
+        if (stale()) return 'stale';
+        if (notes) opts.notes = notes;
+        let res = null; try { res = M1D1Listen.analyse(f32, r.sr, { gen: M1D1Gen, ...opts }); } catch (e) { res = null; }
+        if (!res || res.pitched === false || (quiet && res.oneNote)) {
+          // listening on its own keeps waiting (an intro of drums only), or keeps the chords it already shows;
+          // a press says what was heard
+          if (quiet === 'again') return false;
+          if (quiet) { waitingForTrack = true; return false; }
+          $('#fileName').textContent = 'No chords heard on this track: is it drums only? Put M1D1 on a track with chords or bass';
+          react('thinking', 2); return false;
+        }
+        // listening again on its own: nothing to do while what it hears has not changed
+        const sig = JSON.stringify([res.spec, res.key.root, res.key.scaleIdx]);
+        if (quiet === 'again' && sig === lastReadSig) return 'same';
+        lastReadSig = sig; readUserSig = null;
+        const buf = ctx.createBuffer(1, f32.length, r.sr); buf.copyToChannel(f32, 0);
+        if (mode === 'generate') setMode('extract');
+        listenTo(buf, opts, res);
+        pause(); buffer = buf; hasAudio = true; isExample = false; offset = 0; overview = null; $('#hint').hidden = true;
+        fileName = 'Your track'; waitingForTrack = false; noChordsYet = false;
+        const warn = res.notes.find(n => /not the project|less than .* bars were heard|seems longer than/.test(n));
+        $('#fileName').textContent = warn ? warn[0].toUpperCase() + warn.slice(1) : `Your track · ${Math.round(r.secs * r.bpm / 60 / r.beatsPerBar)} bars heard`;
+        lastReadAt = heardBeats;
+        // a read again on its own updates the chords in place (no new reveal, no gap in the MIDI)
+        if (quiet === 'again') { renderChords(true); applyDetail(true); changed([0, 1, 2]); syncStates(); ui(); }
+        else { ui(); run(); }
+        return true;
+      } finally { if (liveRead === tok) liveRead = 0; }
     }
-    tb.addEventListener('click', async () => { rereads = 0; busy = true; try { await listenToTrack(false); } finally { busy = false; } });
+    // a press reads now: a read on its own still waiting for its notes is dropped (the newer read wins)
+    tb.addEventListener('click', () => { rereads = 0; listenToTrack(false); });
     hostModeChanged = () => { if (mode === 'generate') waitingForTrack = false; else if (!buffer && !exampleOn && !sessionNote) startEmpty(); };
     // listening on its own: once the DAW has played one whole 4-bar stretch of the song's grid
     // After the first read, M1D1 reads the track again each time 4 more bars have played (an intro gives way to the
     // song, an 8-bar progression gets read whole, passes are averaged), while nothing was changed by hand, until two
-    // reads in a row agree or a minute was heard.
-    // what you changed by hand since the last read: a change ends the re-reads (your edit stays)
-    const userSig = () => JSON.stringify([spec, keyRoot, scaleIdx, setIdx, PT, knobs.map(k => k.v), midiParts]);
-    setInterval(async () => {
-      if (busy) return;
+    // reads in a row agree or a minute was heard. Never while another read is in flight (a file, a press, its own):
+    // polling covers asking the plugin what it has heard; once a read starts, its ticket covers it (release()), so a
+    // read dropped by Reset or a file does not hold up listening again while its notes finish in the Worker.
+    let polling = null;
+    async function listenOnItsOwn(release) {
       if (rereads > 0 && stage4 && readUserSig === null) readUserSig = userSig();   // what the read left, once shown
       if (rereads > 0 && readUserSig !== null && userSig() !== readUserSig) rereads = 0;
-      if (rereads > 0 && hostRun && mode === 'extract' && !history.length && !waitingForTrack && stage4) {
-        if (heardBeats < lastReadAt + 4 * meter.beats) return;
-        const info = await call('getCaptureInfo'); if (!info) return;
-        busy = true; const r = await listenToTrack('again'); busy = false;
+      const again = () => rereads > 0 && hostRun && mode === 'extract' && !history.length && !waitingForTrack && stage4;
+      const first = () => waitingForTrack && hostRun && mode === 'extract';
+      if (!again() && !first()) return;
+      if (again() && heardBeats < lastReadAt + 4 * meter.beats) return;
+      const gen = readGen, info = await call('getCaptureInfo');
+      // anything that happened while the plugin answered (a read began, Reset, the example, a mode change) wins
+      if (!info || gen !== readGen || readInFlight()) return;
+      if (again()) {
+        const pending = listenToTrack('again'); release();
+        const r = await pending;
+        if (r === 'stale') return;   // dropped: whatever replaced it has set the page
         if (r === true) readUserSig = null;
         if (r === 'same' || r === false || info.beats * 60 / tempo > 60) rereads = 0; else rereads--;
         lastReadAt = heardBeats;
         return;
       }
-      if (!waitingForTrack || !hostRun || mode !== 'extract') return;
-      const info = await call('getCaptureInfo'); if (!info) return;
+      if (!first()) return;
       const from = info.fromBeat, end = from + info.beats, win = Math.ceil(from / 16 - 1e-6) * 16, have = Math.max(0, end - win);
       const fresh = Math.max(0, Math.min(have, 16.5 - (notBefore - heardBeats)));   // after Reset: only what played since
       if (fresh >= 16.5 && heardBeats >= nextTry) {
-        waitingForTrack = false; busy = true; const ok = await listenToTrack(true); busy = false;
+        // it stays waiting while it reads: a read dropped by something newer leaves the wait as that left it
+        const pending = listenToTrack(true); release();
+        const ok = await pending;
+        if (ok === 'stale') return;
         // nothing with chords yet: try again after 4 more bars (not every moment)
         if (!ok) { waitingForTrack = true; noChordsYet = true; nextTry = heardBeats + 4 * meter.beats; $('#fileName').textContent = 'Listening to your track · no chords heard yet'; }
         else { rereads = 8; nextTry = 0; }
       }
       else if (!noChordsYet) $('#fileName').textContent = `Listening to your track · ${Math.min(4, Math.floor(fresh / 4) + 1)} of 4 bars`;
+    }
+    setInterval(() => {
+      if (polling || readInFlight()) return;
+      const mine = {}, release = () => { if (polling === mine) polling = null; };
+      polling = mine; listenOnItsOwn(release).then(release, release);
     }, 700);
     // anything else that brings chords ends the wait; Reset in Extract starts it again
     $('#btnExample').addEventListener('click', () => { waitingForTrack = false; rereads = 0; });
