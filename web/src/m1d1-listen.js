@@ -5,6 +5,8 @@
 // fall, which beat starts the bar, and which of the preview's seven scales the chords belong to.
 // Optionally, opts.notes (a note transcription of the same audio: Spotify's Basic Pitch, run by the page) sharpens what
 // the chords are read from; without it, or when it is unusable, the spectrum is read alone, exactly as before.
+// A read that holds nothing (no audio, silence, samples that are not numbers, too short, no pitch) comes back with failed:
+// true, failReason (a short code), no chords (an empty spec) and every confidence 0.
 // Pure and deterministic: no DOM, no Math.random, no state between calls.
 (function (root) {
   'use strict';
@@ -165,7 +167,7 @@
       }
       return used ? s / used / acf[0] : 0;
     };
-    const score = period => { const oct = Math.log2(frameRate * 60 / period / 120); return comb(period, 2) * Math.exp(-0.5 * oct * oct / 0.6); };
+    const score = period => { const oct = Math.log2(frameRate * 60 / period / 120); return comb(period, 8) * Math.exp(-0.5 * oct * oct / 0.6); };
     const refine = (centre, reach) => {
       const beats = Math.min(16, Math.max(4, Math.floor((maxLag - 1) / (centre + reach))));
       let best = centre, bestValue = comb(centre, beats);
@@ -282,15 +284,36 @@
         }
       }
     }
-    // The recording's own tuning: the level-weighted circular mean of how far the peaks sit from the notes.
+    // The recording's own tuning: the level-weighted circular mean of how far the peaks sit from the notes. When the peaks
+    // agree (their resultant is a quarter of their total or more) it is used as it is. In a full mix (drums, noise,
+    // distortion) they agree less (0.07-0.22 measured on detuned rock, EDM and trap mixes) while the mean still points the
+    // right way: from 0.08 up it is used when it is far enough off to matter, 12 cents or more (A = 432 Hz is 32 cents flat).
+    // A smaller offset is left at 0: real instruments in tune spread that much, and reading it moves only noise.
     let c = 0, sn = 0, total = 0;
     for (const list of peaks) for (const p of list) {
       if (p.hz < 60) continue;
       const ang = 2 * Math.PI * (p.midi - Math.round(p.midi));
       c += p.level * Math.cos(ang); sn += p.level * Math.sin(ang); total += p.level;
     }
-    const tuning = !(total > 0) || Math.sqrt(c * c + sn * sn) < 0.25 * total ? 0 : Math.atan2(sn, c) / (2 * Math.PI);
+    const agree = total > 0 ? Math.sqrt(c * c + sn * sn) / total : 0, off = Math.atan2(sn, c) / (2 * Math.PI);
+    const tuning = agree >= 0.25 || (agree >= 0.08 && Math.abs(off) >= 0.12) ? off : 0;
     let loudestStep = 0; for (let s = 0; s < energy.length; s++) if (energy[s] > loudestStep) loudestStep = energy[s];
+    // How much of each beat's sound is one note with its overtones: the share of the peaks' level on the harmonic series
+    // of its lowest strong peak (within 0.5 %; an equal-tempered third is 0.8 % off the fifth overtone), and the share off
+    // that series on other pitch classes than that note and its fifth (another note: a chord's third). A tuned kick, however
+    // distorted, is nearly all on its series (0.77-1.0 on synthetic 808s, 0.00-0.12 off it); every music file of the test
+    // sets 0.33 at most on it; a one-chord vamp over its root's bass 0.64-0.66 on it, but 0.27-0.30 off it.
+    const harmonic = new Float64Array(peaks.length), harmonicOff = new Float64Array(peaks.length), harmonicPc = new Int8Array(peaks.length).fill(-1);
+    for (let s = 0; s < peaks.length; s++) {
+      const list = peaks[s]; let top = 0; for (const p of list) if (p.level > top) top = p.level;
+      const f0 = list.find(p => p.level >= 0.5 * top); if (!f0) continue;
+      const pc0 = mod(Math.round(f0.midi - tuning), 12); let on = 0, off = 0, sum = 0;
+      for (const p of list) {
+        const r = p.hz / f0.hz, k = Math.round(r), pc = mod(Math.round(p.midi - tuning), 12); sum += p.level;
+        if (k >= 1 && Math.abs(r - k) < 0.005 * k) on += p.level; else if (p.hz >= 50 && pc !== pc0 && pc !== (pc0 + 7) % 12) off += p.level;
+      }
+      if (sum > 0) { harmonic[s] = on / sum; harmonicOff[s] = off / sum; harmonicPc[s] = pc0; }
+    }
     const chroma = [], bass = [], sounding = [];
     for (let s = 0; s < peaks.length; s++) {
       const full = new Float64Array(12), low = new Float64Array(12);
@@ -318,7 +341,7 @@
       }
     }
     for (const s of sounding) for (const v of [chroma[s], bass[s]]) { let t = 0; for (let i = 0; i < 12; i++) t += v[i]; if (t > 1e-9) for (let i = 0; i < 12; i++) v[i] /= t; }
-    return { chroma, bass, energy, loudestStep, tuningCents: 100 * tuning };
+    return { chroma, bass, energy, loudestStep, tuningCents: 100 * tuning, harmonic, harmonicOff, harmonicPc };
   }
 
   // ---------- note evidence from a transcriber (opts.notes: Spotify's Basic Pitch, run on the same audio) ----------
@@ -356,7 +379,7 @@
   // doubled in three octaves would otherwise drown a seventh played once. The bass is the lowest key from E1 to A3
   // that holds at least 0.3. Both are normalised to sum 1, as analyseBeats' are; a beat with nothing above the floor
   // is left empty.
-  const NOTE_LO = 28, NOTE_HI = 96, BASS_HI = 57, BASS_ON = 0.3, ABOVE_FLOOR = 0.02, NOTES_QUIET = 0.1;
+  const NOTE_LO = 28, NOTE_HI = 96, BASS_HI = 57, BASS_ON = 0.3, ABOVE_FLOOR = 0.02, NOTES_QUIET = 0.1, MELODY_LO = 60, MELODY_ON = 0.15, MELODY_WEIGHT = 0.6;
   function notesPerBeat(nv, beatTimes, periodSec) {
     const { T, K, m0, timeOf, at } = nv;
     const chroma = [], bass = [], act = new Float64Array(K), inRange = [];
@@ -379,6 +402,16 @@
       if (!(total >= NOTES_QUIET)) continue;                     // nothing with a pitch on this beat
       heard++;
       for (let i = 0; i < K; i++) { const midi = m0 + i; if (midi >= NOTE_LO && midi <= NOTE_HI && act[i] > floor) c[mod(midi, 12)] = Math.max(c[mod(midi, 12)], Math.sqrt(act[i] - floor)); }
+      // A melody (a voice, a lead) is the highest line and often holds a note outside the chord. The highest key from C4 up
+      // that sounds clearly, when no other key plays its pitch class, is such a lone top line: it counts for less.
+      for (let i = K - 1; i >= 0; i--) {
+        const midi = m0 + i; if (midi > NOTE_HI) continue; if (midi < MELODY_LO) break;
+        if (act[i] - floor < MELODY_ON) continue;
+        const pc = mod(midi, 12); let doubled = false;
+        for (let j = 0; j < K && !doubled; j++) { const mj = m0 + j; if (j !== i && mj >= NOTE_LO && mj <= NOTE_HI && mod(mj, 12) === pc && act[j] > floor + 0.05) doubled = true; }
+        if (!doubled) c[pc] *= MELODY_WEIGHT;
+        break;
+      }
       for (let i = 0; i < K; i++) { const midi = m0 + i; if (midi < NOTE_LO || midi > BASS_HI) continue; if (act[i] >= BASS_ON) { b[mod(midi, 12)] = 1; break; } }
       for (const v of [c, b]) { let t = 0; for (let i = 0; i < 12; i++) t += v[i]; if (t > 1e-9) for (let i = 0; i < 12; i++) v[i] /= t; }
     }
@@ -393,6 +426,7 @@
   // of its third harmonic (the fifth above), as real sounds have: OVERTONE of it in the spectrum's chroma, half that
   // when the chroma is half a transcriber's (which hears no overtones).
   const OVERTONE = 0.2;
+  const TONAL_NONE = 0.3, TONAL_SURE = 0.45;   // tonality (see readChords): no clear notes at all .. enough to trust a reading
   function shapeOf(pcs, overtone) {
     const shape = new Float64Array(12);
     for (const pc of pcs) { shape[pc] += 1; shape[mod(pc + 7, 12)] += overtone; }
@@ -553,8 +587,8 @@
     return 0.3;
   }
   function detectKey(heard, chromaSum, phrase, kt) {
-    kt = kt || {};   // weights that differ from the defaults (on a host grid, the first chord says nothing)
-    // heard: one { root, tri } per sounding beat; phrase: the same for the 4 bars the progression is read from
+    kt = kt || {};   // weights that differ from the defaults (on a host grid, the first chord says nothing); long: more than 4 bars were read
+    // heard: one { root, tri } per sounding beat; phrase: the same for the 4 (or 8) bars the progression is read from
     const scored = [];
     const first = phrase.length ? phrase[0] : null, last = phrase.length ? phrase[phrase.length - 1] : null;
     for (let r = 0; r < 12; r++) for (let s = 0; s < SCALES.length; s++) {
@@ -563,7 +597,9 @@
       for (const h of heard) { cover += sayable(h, r, st); if (h.root === r && h.tri === tonicTri) share++; }
       if (heard.length) { cover /= heard.length; share /= heard.length; }
       const opens = first && first.root === r && first.tri === tonicTri ? 1 : 0;
-      const cadence = last && last.root === (r + 7) % 12 && last.tri !== 'dim' ? 1 : 0;
+      // a 4-bar loop that ends on V turns round to the tonic; an 8-bar phrase mostly ends at home itself, and a last chord
+      // on the tonic would credit the key a fifth below (measured on real recordings read in 8 bars)
+      const cadence = !kt.long && last && last.root === (r + 7) % 12 && last.tri !== 'dim' ? 1 : 0;
       // in a minor key, a major chord on the fifth degree (it holds the raised leading note) that goes to the
       // tonic chord, round the loop too, points at that tonic
       let resolves = 0;
@@ -584,15 +620,25 @@
     const o = opts || {};
     const notes = [];
     BPB = o.grid && o.grid.beatsPerBar > 0 ? Math.max(2, Math.min(12, Math.round(+o.grid.beatsPerBar))) : 4;
-    const fallback = why => ({ bpm: 120, bpmConfidence: 0, beatOffsetSec: 0, key: { root: 9, scaleIdx: 0 }, keyConfidence: 0,
-      spec: [{ d: 0, len: 8 }, { d: 0, len: 8 }], confidence: [0, 0], chordConfidence: 0, bassPcs: new Array(16).fill(-1), notes: [why] });
-    if (!samples || !samples.length || !(sampleRate > 0)) return fallback('no audio to listen to');
-    if (!(samples instanceof Float32Array)) { try { samples = Float32Array.from(samples); } catch (e) { return fallback('no audio to listen to'); } }
-    const limitSec = o.grid ? 70 : 60, sr = Number(sampleRate), total = Math.min(samples.length, Math.floor(sr * limitSec));
+    // No reading at all: failed (failReason: 'no-audio', 'invalid', 'silent', 'too-short' or 'no-pitch'; notes[0] says it in
+    // words), no chords (an empty spec) and every confidence 0, so that nothing can pass it off as chords that were heard.
+    const fallback = (why, code) => ({ failed: true, failReason: code, bpm: 120, bpmConfidence: 0, beatOffsetSec: 0, key: { root: 9, scaleIdx: 0 }, keyConfidence: 0,
+      spec: [], confidence: [], chordConfidence: 0, bassPcs: [], notes: [why], tuningCents: 0, tonality: 0, pitched: false, oneNote: false });
+    if (!samples || !samples.length || !(sampleRate > 0)) return fallback('no audio to listen to', 'no-audio');
+    if (!(samples instanceof Float32Array)) { try { samples = Float32Array.from(samples); } catch (e) { return fallback('no audio to listen to', 'no-audio'); } }
+    const limitSec = o.grid ? 70 : 60, sr = Number(sampleRate), total = Math.min(samples.length, Math.floor(sr * limitSec)), audioSec = samples.length / sr;
     if (samples.length > total) notes.push(`only the first ${limitSec} seconds were listened to`);
-    let any = false;
-    for (let i = 0; i < total; i++) { const v = samples[i]; if (v !== v) return fallback('the audio holds invalid samples'); if (v > 1e-5 || v < -1e-5) any = true; }
-    if (!any) return fallback('the audio is silent');
+    // A sample that is not a number (NaN or infinite: a glitch in a plugin, a broken file) is read as silence, on a copy (the
+    // input is left as it was): one bad sample must not void the whole read.
+    const finite = v => v - v === 0;
+    let any = false, bad = 0;
+    for (let i = 0; i < total; i++) { const v = samples[i]; if (!finite(v)) bad++; else if (v > 1e-5 || v < -1e-5) any = true; }
+    if (bad) {
+      if (!any) return fallback('the audio holds no valid samples (they are not numbers)', 'invalid');
+      samples = Float32Array.from(samples.subarray(0, total), v => (finite(v) ? v : 0));
+      notes.push(`${bad} sample${bad === 1 ? ' was not a number (NaN or infinite) and was' : 's were not numbers (NaN or infinite) and were'} read as silence`);
+    }
+    if (!any) return fallback('the audio is silent', 'silent');
 
     const dO = Math.max(1, Math.round(sr / 22050)), dC = Math.max(1, Math.round(sr / 11025));
     const xO = decimate(samples, total, dO), srO = sr / dO, xC = dC === dO ? xO : decimate(samples, total, dC), srC = sr / dC;
@@ -655,7 +701,7 @@
     // the beats of the grid, and what sounds on each
     const beatTimes = [];
     for (let k = 0; first + k * periodSec < seconds - 0.25 * periodSec && k < 400; k++) beatTimes.push(first + k * periodSec);
-    if (beatTimes.length < 2) return fallback('the audio is too short to find chords in');
+    if (beatTimes.length < 2) return fallback('the audio is too short to find chords in', 'too-short');
     const all = analyseBeats(xC, srC, beatTimes, periodSec);
     // the middle's own chroma: what is sounding where, and how passes compare, are judged on it alone
     const mid = all.chroma.map(c => Float64Array.from(c));
@@ -663,11 +709,12 @@
     // and the chords are read from that mix. What was measured on the spectrum keeps reading the spectrum's own chroma
     // and bass (spectral, spectralBass): which beats sound, where the bar starts and how passes compare (mid above), how
     // readily the tracker changes chord and inverts one, and the drums / one-note tests.
-    let spectral = null, spectralBass = null, overtone = OVERTONE;
+    let spectral = null, spectralBass = null, overtone = OVERTONE, notesHeard = null;
     if (o.notes) {
       let heard = null;
-      try { heard = notesPerBeat(readNotes(o.notes, samples.length / sr), beatTimes, periodSec); } catch (e) { notes.push(`the note transcription could not be used: ${e.message}`); }
+      try { heard = notesPerBeat(readNotes(o.notes, audioSec), beatTimes, periodSec); } catch (e) { notes.push(`the note transcription could not be used: ${e.message}`); }
       if (heard && heard.heard) {
+        notesHeard = heard;
         spectral = all.chroma.map(c => Float64Array.from(c)); spectralBass = all.bass.map(b => Float64Array.from(b));
         for (let k = 0; k < beatTimes.length; k++) {
           if (!(all.energy[k] > 0.01 * all.loudestStep)) continue;
@@ -678,7 +725,9 @@
     }
     const midBass = spectralBass || all.bass;
     if (o.side && o.side.length >= total) {
-      const xS = decimate(o.side instanceof Float32Array ? o.side : Float32Array.from(o.side), total, dC), side = analyseBeats(xS, srC, beatTimes, periodSec);
+      let sideIn = o.side instanceof Float32Array ? o.side : Float32Array.from(o.side);
+      for (let i = 0; i < total; i++) if (!finite(sideIn[i])) { sideIn = Float32Array.from(sideIn.subarray(0, total), v => (finite(v) ? v : 0)); break; }
+      const xS = decimate(sideIn, total, dC), side = analyseBeats(xS, srC, beatTimes, periodSec);
       for (let k = 0; k < beatTimes.length; k++) {
         // Only on beats where the music sounds in the middle too, and where the side carries a large share of it (a
         // part spread out of phase). Quiet beats are left alone: their side is reverb tails, which would read as chords.
@@ -710,7 +759,8 @@
     for (let p = 0; p < 4; p++) { barScore[p] = barCount[p] ? barScore[p] / barCount[p] : 0; if (barScore[p] > novTop) novTop = barScore[p]; }
     // spec16, specBass16: the spectrum's own chroma and bass on the same beats as chroma and bass (with note evidence)
     let down, N, chroma, bass, downSec, spec16 = null, specBass16 = null; const gridInfo = {};
-    if (grid) ({ down, N, chroma, bass, downSec, spec16, specBass16 } = gridWindow());
+    let windowed = !!grid;
+    if (grid) ({ down, N, chroma, bass, downSec, spec16, specBass16 } = gridWindow(grid));
     else {
     let barPhase = firstSound % 4, barBest = -1;
     for (let p = 0; p < 4; p++) { const v = (novTop > 1e-9 ? barScore[p] / novTop : 0) + (p === firstSound % 4 ? 0.3 : 0); if (v > barBest) { barBest = v; barPhase = p; } }
@@ -722,16 +772,22 @@
     let lastSound = G - 1; while (lastSound > down && !sounding(lastSound)) lastSound--;
     N = lastSound - down + 1; chroma = all.chroma.slice(down, down + N); bass = all.bass.slice(down, down + N);
     if (spectral) { spec16 = spectral.slice(down, down + N); specBass16 = spectralBass.slice(down, down + N); }
+    // Two passes of 4 bars or more: read as on a host's grid that starts on the first downbeat (passes compared, the
+    // alike ones averaged, 8 bars when the 4-bar stretches differ).
+    if (tempo && N >= 8 * BPB) {
+      const w = gridWindow({ segments: [{ sec: beatTimes[down], beat: 0 }] });
+      if (w.N) { ({ down, N, chroma, bass, spec16, specBass16 } = w); downSec = w.firstSec; windowed = true; }
     }
-    if (!N) return fallback('nothing with a pitch was heard');
-    beatOffsetSec = Math.max(0, grid ? downSec : beatTimes[down]);
+    }
+    if (!N) return fallback('nothing with a pitch was heard', 'no-pitch');
+    beatOffsetSec = Math.max(0, windowed ? downSec : beatTimes[down]);
 
     // The 16 beats of the song's 4-bar grid that hold what was heard: song beats 16w ... 16w+15. When the music
     // repeats every 4 bars, every pass is averaged (steadier chords); when it does not (a longer progression),
     // only the latest pass is read, and the notes say which bars.
-    function gridWindow() {
-      const segs = Array.isArray(grid.segments) && grid.segments.length ? grid.segments.map(s => ({ sec: +s.sec || 0, beat: +s.beat || 0 })).sort((a, b) => a.sec - b.sec)
-        : [{ sec: 0, beat: (+grid.startBeat || 0) - gridK0 }];
+    function gridWindow(g) {
+      const segs = Array.isArray(g.segments) && g.segments.length ? g.segments.map(s => ({ sec: +s.sec || 0, beat: +s.beat || 0 })).sort((a, b) => a.sec - b.sec)
+        : [{ sec: 0, beat: (+g.startBeat || 0) - gridK0 }];
       const songBeat = k => { const tk = beatTimes[k]; let s = segs[0]; for (const x of segs) if (x.sec <= tk + 0.25 * periodSec) s = x; return Math.round(s.beat + (tk - s.sec) / periodSec); };
       const bpb = BPB, W4 = 4 * bpb, W8 = 8 * bpb;
       // How much of each 4-bar stretch's sound is in its three strongest notes. A stretch well below the best one
@@ -799,14 +855,16 @@
       if (plain || subtle) {
         const s32 = pick(windowsOf(W8), W8);
         if (s32 && s32.covered >= W8 - 2) { len = W8; sel = s32; }
-        else notes.push('the progression seems longer than 4 bars: play 8 whole bars and listen again to read all of it');
+        else notes.push(grid ? 'the progression seems longer than 4 bars: play 8 whole bars and listen again to read all of it'
+          : 'the progression seems longer than 4 bars: open a longer part of the song (8 whole bars) to read all of it');
       }
       if (!sel) return { N: 0 };
-      if (sel.covered < len - 2) notes.push(`less than ${len / bpb} bars were heard on the grid: play the track a little longer and listen again for every chord`);
+      if (sel.covered < len - 2) notes.push(grid ? `less than ${len / bpb} bars were heard on the grid: play the track a little longer and listen again for every chord`
+        : `less than ${len / bpb} bars of the file have chords: open a longer part of the song to read every chord`);
       const used = sel.used, latest = sel.latest;
       if (used.length < sel.list.length) {
         const w = sel.latestW;
-        notes.push(`the progression changes over more than ${len / bpb} bars: these are bars ${Math.floor(len * w / bpb) + 1}-${Math.floor(len * (w + 1) / bpb)} of your song`);
+        notes.push(`the progression changes over more than ${len / bpb} bars: these are bars ${Math.floor(len * w / bpb) + 1}-${Math.floor(len * (w + 1) / bpb)} ${grid ? 'of your song' : 'of the file, from its first downbeat'}`);
       } else { const passes = used.filter(([, ks]) => soundingIn(ks) >= len / 2).length; if (passes > 1 && full.length > 1) notes.push(`${passes} passes of the ${len / bpb} bars were heard and averaged`); }
       const ch = [], ba = [], sc = [], sb = [];
       for (let p = 0; p < len; p++) {
@@ -822,18 +880,21 @@
       // where the cycle starts: the time of the latest stretch's first place (it may lie before the audio; then a cycle later)
       const p0 = latest.findIndex(k => k >= 0), k0 = latest[p0];
       let start = beatTimes[k0] - p0 * periodSec; while (start < -1e-6) start += len * periodSec;
-      return { down: k0, downSec: start, N: len, chroma: ch, bass: ba, spec16: spectral ? sc : null, specBass16: spectral ? sb : null };
+      const firstUsed = used.find(([w]) => w >= 0);
+      let firstSec = start;
+      if (firstUsed) { const ks = firstUsed[1], pf = ks.findIndex(k => k >= 0); firstSec = beatTimes[ks[pf]] - pf * periodSec; while (firstSec < -1e-6) firstSec += len * periodSec; }
+      return { down: k0, downSec: start, firstSec, N: len, chroma: ch, bass: ba, spec16: spectral ? sc : null, specBass16: spectral ? sb : null };
     }
 
     // the 16 beats the progression is read from; shorter audio is looped (in whole bars when it has any)
-    const LEN = grid ? N : 16, MAXCH = LEN > 4 * BPB ? 16 : 8;
+    const LEN = windowed ? N : 16, MAXCH = LEN > 4 * BPB ? 16 : 8;
     const loopLen = N >= LEN ? LEN : N >= BPB ? N - (N % BPB) : N, at = t => t % loopLen;
 
     // The key and the chords from one reading of the beats from the first downbeat on (ch, ba: their chroma and bass).
     // own: the spectrum's own chroma and bass on the same beats, when ch and ba mix in a transcriber's; verdict: whether
     // there are chords to read at all ({ pitched, oneNote }), when that is known already. Null when nothing with a pitch
     // was heard; `said` holds its notes.
-    function readChords(ch, ba, own, overtone, verdict) {
+    function readChords(ch, ba, own, overtone, verdict, whole) {
       const said = [];
       // what is heard before a key is known
       const free = freeCandidates(overtone), freeTrack = track(free, ch, ba, 0.75, own);
@@ -841,11 +902,18 @@
       const heard = [], chromaSum = new Float64Array(12);
       for (let t = 0; t < N; t++) { if (freeTrack.silent[t]) continue; heard.push(heardAt(t)); for (let i = 0; i < 12; i++) chromaSum[i] += ch[t][i]; }
       if (!heard.length) return null;
+      // the key from the whole recording (when there is more of it than the stretch read)
+      let keyHeard = heard, keySum = chromaSum;
+      if (whole && whole.chroma.length > N) {
+        const wt = track(free, whole.chroma, whole.bass, 0.75, whole.own), kh = [], ks = new Float64Array(12);
+        for (let t = 0; t < whole.chroma.length; t++) { if (wt.silent[t]) continue; const c = free[wt.states[wt.path[t]].c]; kh.push({ root: c.root, tri: c.tri }); for (let i = 0; i < 12; i++) ks[i] += whole.chroma[t][i]; }
+        if (kh.length) { keyHeard = kh; keySum = ks; }
+      }
       if (N < LEN) said.push(`only ${N} beat${N === 1 ? '' : 's'} of audio after the first downbeat: ${loopLen === N ? 'they were' : `the first ${loopLen} were`} looped to fill 4 bars`);
       const phrase = []; for (let t = 0; t < Math.min(LEN, loopLen); t++) if (!freeTrack.silent[t]) phrase.push(heardAt(t));
       // (on the host's grid the window starts on the song's 4-bar grid, which is often but not always where the progression
       // starts: its first chord counts for a third of what it does in a file; measured best for songs on and off the grid)
-      const keys = detectKey(heard, chromaSum, phrase, grid ? { opens: 0.04 } : null), key = { root: keys[0].root, scaleIdx: keys[0].scaleIdx };
+      const keys = detectKey(keyHeard, keySum, phrase, { opens: grid ? 0.04 : 0.12, long: !grid && LEN > 4 * BPB }), key = { root: keys[0].root, scaleIdx: keys[0].scaleIdx };
       const samePitches = (a, b) => { const A = SCALES[a.scaleIdx].st.map(x => (x + a.root) % 12).sort().join(), B = SCALES[b.scaleIdx].st.map(x => (x + b.root) % 12).sort().join(); return A === B; };
       const rival = keys.find(k => k !== keys[0] && !(k.root === keys[0].root && k.scaleIdx > 1 && keys[0].scaleIdx <= 1));
       let keyConfidence = clamp01(0.25 + 4 * (keys[0].score - rival.score)) * clamp01(keys[0].cover);
@@ -926,22 +994,82 @@
         const w = v / sum;
         topCount[top] += w; beatsWithPitch += w; for (let i = 0; i < 12; i++) prof[i] += w * c[i] / v;
       }
-      const lone = topCount.indexOf(Math.max(...topCount)), tops = topCount.filter(k => k >= 0.15 * beatsWithPitch).length;
+      const lone = verdict && verdict.lone !== undefined ? verdict.lone : topCount.indexOf(Math.max(...topCount)), tops = topCount.filter(k => k >= 0.15 * beatsWithPitch).length;
       let others = 0; for (let i = 0; i < 12; i++) if (i !== 0 && i !== 7) others += prof[(lone + i) % 12];
       others = prof[lone] > 0 ? 100 * others / prof[lone] : 0;
       const oneNote = verdict ? verdict.oneNote : pitched && beatsWithPitch > 0 && tops <= 1 && others < 60;
       if (oneNote) { keyConfidence = Math.min(keyConfidence, 0.3); said.push(`only one note sounds (${NOTE[lone]}), like a tuned kick or a held bass note: the key and chords are a guess`); }
       let cc = 0; spec.forEach((el, i) => { cc += confidence[i] * el.len; });
-      const chordConfidence = Math.round(clamp01(cc / LEN) * (0.5 + 0.5 * keyConfidence) * (oneNote ? 0.5 : 1) * 1000) / 1000;
+      let chordConfidence = Math.round(clamp01(cc / LEN) * (0.5 + 0.5 * keyConfidence) * (oneNote ? 0.5 : 1) * 1000) / 1000;
+      // How sure the key and chords can be at most. Little of the sound in a few notes (tonality under 0.45: drums, a tuned
+      // kick with drums, muted strumming; measured on real guitar recordings: 50-60 % of the roots right there, against 75-80 %
+      // above 0.5) or little of the progression heard (a clip shorter than it, looped) caps every confidence, the note
+      // transcription's too (it hears notes in drums as readily as in chords).
+      let heardBeats = 0; for (let t = 0; t < Math.min(loopLen, LEN); t++) if (!freeTrack.silent[t]) heardBeats++;
+      const pitchCap = clamp01((tonality - TONAL_NONE) / (TONAL_SURE - TONAL_NONE)), heardCap = 0.4 + 0.6 * Math.min(1, heardBeats / LEN);
+      const cap = Math.min(pitchCap, heardCap);
+      if (cap < 1) {
+        keyConfidence = Math.min(keyConfidence, cap); chordConfidence = Math.min(chordConfidence, Math.round(cap * 1000) / 1000);
+        for (let i = 0; i < confidence.length; i++) confidence[i] = Math.min(confidence[i], Math.round(cap * 1000) / 1000);
+        if (pitched && pitchCap < 0.75) said.push('little of the sound is in clear notes (drums, noise or muted playing): the key and chords are not certain');
+      }
       return { key, keyConfidence, spec, confidence, chordConfidence, bassPcs, tonality, pitched, oneNote, said,
         spread: { tops, others: Math.round(others), offKey: Math.round(offKey * 100) / 100 } };
     }
     // The spectrum's own reading says whether there are chords to read at all (the drums-only and one-note tests were
-    // measured on it). With note evidence, the chords are then read again from the mix, but only when there are: for
-    // drums only or a single note, the transcription has nothing to add.
-    const plain = spec16 ? readChords(spec16, specBass16, null, OVERTONE, null) : readChords(chroma, bass, null, OVERTONE, null);
-    if (!plain) return fallback('nothing with a pitch was heard');
-    const read = spec16 && plain.pitched && !plain.oneNote ? readChords(chroma, bass, { chroma: spec16, bass: specBass16 }, overtone, plain) || plain : plain;
+    // measured on it); what the transcription hears over the whole audio can overrule it (below). With note evidence, the
+    // chords are then read again from the mix, but only when there are: for drums only or a single note, the
+    // transcription has nothing to add.
+    const wholeK = []; for (let k = 0; k < G; k++) if (sounding(k)) wholeK.push(k);
+    const wholeOf = (c, b, own) => ({ chroma: wholeK.map(k => c[k]), bass: wholeK.map(k => b[k]), own: own ? { chroma: wholeK.map(k => own.c[k]), bass: wholeK.map(k => own.b[k]) } : null });
+    const readPlain = verdict => (spec16 ? readChords(spec16, specBass16, null, OVERTONE, verdict, wholeOf(spectral, spectralBass, null))
+      : readChords(chroma, bass, null, OVERTONE, verdict, wholeOf(all.chroma, all.bass, null)));
+    let plain = readPlain(null);
+    if (!plain) return fallback('nothing with a pitch was heard', 'no-pitch');
+    // One note with its overtones on nearly every beat (a distorted tuned kick: its fifth, third and seventh overtones spell
+    // a chord, and a snare between its hits keeps the chroma test above from seeing one note) is one note.
+    if (plain.pitched && !plain.oneNote && wholeK.length >= 8) {
+      let sum = 0, off = 0, on = 0; const pcs = new Array(12).fill(0);
+      for (const k of wholeK) { sum += all.harmonic[k]; off += all.harmonicOff[k]; if (all.harmonic[k] >= 0.6 && all.harmonicPc[k] >= 0) { on++; pcs[all.harmonicPc[k]]++; } }
+      const lone = pcs.indexOf(Math.max(...pcs));
+      if (sum >= 0.6 * wholeK.length && off <= 0.15 * wholeK.length && on && pcs[lone] >= 0.9 * on) plain = readPlain({ pitched: true, oneNote: true, lone }) || plain;
+    }
+    // What the transcription hears over the beats that sound overrules the spectrum's verdict, which drums can fool:
+    // - A drum kit (tuned toms, a cowbell, a kick) puts its two strongest 'notes' a semitone apart on nearly every beat (97 %
+    //   measured; music in tune 37 % at most), always the same ones (the strongest is one note on 71-81 % of the beats) and
+    //   little else (the rest 1.7-2.6 times the strongest). Music a quarter tone off splits every note between two keys too
+    //   (up to 90 %), but its strongest note moves with the chords (15-50 %), many notes sound (3.5-11 times) and the
+    //   spectrum hears its tuning. -> drums only.
+    // - A lone tuned kick or bass note is the strongest note on nearly every beat, with next to nothing on its third or
+    //   anywhere but its fifth (98-100 % of the beats, third 0.17-0.19 and the rest 0.54-0.58 of it; music at most 89 %, and
+    //   0.23 / 0.85 then). -> one note.
+    // - Muted strumming (real guitar: tonality 0.33-0.37) can look like drums to the spectrum, while the transcription hears
+    //   notes on every beat, many (5-11 times the strongest), moving (the strongest one on 24-38 % of the beats) and not in
+    //   clusters (0-11 %); drum loops: clusters on 60-97 % of the beats, the same strongest note on 63-81 %. -> music.
+    if (notesHeard && wholeK.length >= 8) {
+      let n = 0, cluster = 0; const tops = new Array(12).fill(0);
+      for (const k of wholeK) {
+        const v = notesHeard.chroma[k]; let a = 0; for (let i = 1; i < 12; i++) if (v[i] > v[a]) a = i;
+        if (!(v[a] > 0)) continue;
+        let b = a ? 0 : 1; for (let i = 0; i < 12; i++) if (i !== a && v[i] > v[b]) b = i;
+        n++; tops[a]++; if (v[b] > 0.5 * v[a] && (mod(a - b, 12) === 1 || mod(b - a, 12) === 1)) cluster++;
+      }
+      const lone = tops.indexOf(Math.max(...tops)), top = n ? tops[lone] / n : 0; let third = 0, rest = 0, m = 0;
+      for (const k of wholeK) {
+        const v = notesHeard.chroma[k]; if (!(v[lone] > 0)) continue;
+        m++; third += (v[(lone + 3) % 12] + v[(lone + 4) % 12]) / v[lone];
+        for (let i = 0; i < 12; i++) if (i !== lone && i !== (lone + 7) % 12) rest += v[i] / v[lone];
+      }
+      if (m) { third /= m; rest /= m; }
+      let verdict = null;
+      if (n >= 8 && plain.pitched && !plain.oneNote) {
+        const drums = cluster >= 0.6 * n && top >= 0.6 && rest < 3 && Math.abs(all.tuningCents) < 25;
+        const one = !drums && top >= 0.9 && third < 0.25 && rest < 0.7;
+        if (drums || one) verdict = { pitched: !drums, oneNote: one, lone };
+      } else if (!plain.pitched && n >= 0.8 * wholeK.length && cluster < 0.3 * n && top < 0.5 && rest >= 3 && plain.tonality >= 0.3) verdict = { pitched: true, oneNote: false };
+      if (verdict) plain = readPlain(verdict) || plain;
+    }
+    const read = spec16 && plain.pitched && !plain.oneNote ? readChords(chroma, bass, { chroma: spec16, bass: specBass16 }, overtone, plain, wholeOf(all.chroma, all.bass, { c: spectral, b: spectralBass })) || plain : plain;
     notes.push(...read.said);
     if (bpmConfidence < 0.35 && tempo && !grid) notes.push('the beat is not steady or not clear: tempo and chord timing may be off');
     return { bpm, bpmConfidence: Math.round(bpmConfidence * 1000) / 1000, beatOffsetSec: Math.round(beatOffsetSec * 10000) / 10000,

@@ -138,13 +138,14 @@ function expand(spec, key) {
   for (const el of spec) { const ct = Gen.chordTones(el, key); for (let b = 0; b < el.len; b++) out.push({ root: ct.tones.root, bass: ct.pcs[0], set: [...new Set(ct.pcs)].sort((a, b) => a - b).join(',') }); }
   return out;
 }
-function checkShape(r, name) {
+function checkShape(r, name, beats = 16) {
   assert.ok(Number.isFinite(r.bpm) && r.bpm >= 60 && r.bpm <= 200, `${name}: bpm ${r.bpm}`);
   for (const k of ['bpmConfidence', 'keyConfidence', 'chordConfidence']) assert.ok(r[k] >= 0 && r[k] <= 1, `${name}: ${k} ${r[k]}`);
   assert.ok(Number.isFinite(r.beatOffsetSec) && r.beatOffsetSec >= 0, `${name}: beatOffsetSec`);
   assert.ok(Number.isInteger(r.key.root) && r.key.root >= 0 && r.key.root < 12 && Number.isInteger(r.key.scaleIdx) && r.key.scaleIdx >= 0 && r.key.scaleIdx < 7, `${name}: key`);
-  assert.ok(Array.isArray(r.spec) && r.spec.length >= 2 && r.spec.length <= 8, `${name}: spec has ${r.spec && r.spec.length} elements`);
-  assert.strictEqual(r.spec.reduce((a, e) => a + e.len, 0), 16, `${name}: lens sum`);
+  assert.ok(!r.failed, `${name}: the read failed (${r.failReason}: ${r.notes && r.notes[0]})`);
+  assert.ok(Array.isArray(r.spec) && r.spec.length >= 2 && r.spec.length <= (beats > 16 ? 16 : 8), `${name}: spec has ${r.spec && r.spec.length} elements`);
+  assert.strictEqual(r.spec.reduce((a, e) => a + e.len, 0), beats, `${name}: lens sum`);
   for (const e of r.spec) {
     assert.ok(Number.isInteger(e.d) && e.d >= 0 && e.d <= 6 && Number.isInteger(e.len) && e.len >= 1, `${name}: element ${JSON.stringify(e)}`);
     assert.ok(e.q === undefined || ['dom7', 'sus4', 'maj'].includes(e.q), `${name}: q`);
@@ -155,7 +156,7 @@ function checkShape(r, name) {
   }
   assert.strictEqual(r.confidence.length, r.spec.length, `${name}: confidence length`);
   for (const c of r.confidence) assert.ok(c >= 0 && c <= 1, `${name}: confidence ${c}`);
-  assert.ok(Array.isArray(r.bassPcs) && r.bassPcs.length === 16 && r.bassPcs.every(p => Number.isInteger(p) && p >= -1 && p < 12), `${name}: bassPcs`);
+  assert.ok(Array.isArray(r.bassPcs) && r.bassPcs.length === beats && r.bassPcs.every(p => Number.isInteger(p) && p >= -1 && p < 12), `${name}: bassPcs`);
   assert.ok(Array.isArray(r.notes) && r.notes.every(s => typeof s === 'string'), `${name}: notes`);
   // the generator accepts the spec as a frame
   const key = keyOf(r.key.root, r.key.scaleIdx);
@@ -277,8 +278,12 @@ if (!onlyArg) {
     '8 kHz audio': [synth({ root: 0, scaleIdx: 1, spec: MAJOR[0], bpm: 120, bars: 8, sr: 8000 }).samples, 8000],
   };
   for (const [name, [x, sr]] of Object.entries(odd)) {
-    let r; try { r = Listen.analyse(x, sr, { gen: Gen }); checkShape(r, name); } catch (e) { check(false, `${name}: ${e.message}`); continue; }
-    if (['empty', 'silence', 'null', 'bad rate', 'NaN', 'noise'].includes(name)) check(r.notes.length > 0 && (r.bpmConfidence === 0 || r.chordConfidence < 0.5), `${name}: says it could not listen (${JSON.stringify(r.notes)}, conf ${r.bpmConfidence}/${r.chordConfidence})`);
+    // what could not be read at all is a failed read: no chords, every confidence 0, the reason in failReason and notes[0]
+    const failed = ['empty', 'silence', 'null', 'bad rate', 'NaN', 'half a second'].includes(name);
+    let r; try { r = Listen.analyse(x, sr, { gen: Gen }); if (!failed) checkShape(r, name); } catch (e) { check(false, `${name}: ${e.message}`); continue; }
+    if (failed) check(r.failed === true && typeof r.failReason === 'string' && r.spec.length === 0 && r.confidence.length === 0 && r.pitched === false && r.bpmConfidence === 0 && r.keyConfidence === 0 &&
+      r.chordConfidence === 0 && r.notes.length > 0 && typeof r.notes[0] === 'string', `${name}: a failed read with no chords (${r.failReason}: ${JSON.stringify(r.notes)})`);
+    if (name === 'noise') check(r.notes.length > 0 && (r.bpmConfidence === 0 || r.chordConfidence < 0.5), `${name}: says it could not listen (${JSON.stringify(r.notes)}, conf ${r.bpmConfidence}/${r.chordConfidence})`);
     if (verbose) console.log(`  ${name}: bpm ${r.bpm} conf ${r.bpmConfidence}/${r.keyConfidence}/${r.chordConfidence} notes ${JSON.stringify(r.notes)}`);
   }
   const held = Listen.analyse(odd['one held chord'][0], 44100, { gen: Gen });
@@ -305,6 +310,116 @@ if (!onlyArg) {
     check(r.notes.some(s => /outside the key.*bar 3/.test(s)), `borrowed bVI in bar 3 is reported (${JSON.stringify(r.notes)})`);
     if (verbose) console.log('  borrowed:', JSON.stringify(r.spec), r.notes);
   }
+}
+
+// ---------- fixes of 2026-11 (real recordings and review): tuning, file reads, confidence, broken samples ----------
+// Run one group with --only=tuning|file|confidence|robust.
+const fixGroup = g => !onlyArg || onlyArg === g;
+if (fixGroup('tuning')) {
+  // Pads with drums under heavy noise: the spectral peaks agree on their tuning far less than in a clean mix (as in a full
+  // mix with distortion), yet a recording tuned 40-45 cents off must still read right; one a few cents off is left alone.
+  const noisy = { snare: true, hat: 0.4, noise: 0.2 };
+  for (const [name, c, want] of [
+    ['42 cents sharp', { root: 10, scaleIdx: 0, spec: MINOR[0], bpm: 96, tune: 42, seed: 6 }, 42],
+    ['45 cents flat', { root: 5, scaleIdx: 1, spec: MAJOR[0], bpm: 110, tune: -45, seed: 5, noise: 0.15 }, -45],
+    ['in tune', { root: 0, scaleIdx: 1, spec: MAJOR[0], bpm: 128, tune: 0, seed: 7 }, 0],
+    ['8 cents flat', { root: 0, scaleIdx: 1, spec: MAJOR[0], bpm: 128, tune: -8, seed: 7 }, 0],
+  ]) {
+    const a = synth({ ...noisy, ...c }), r = Listen.analyse(a.samples, a.sr, { gen: Gen }); checkShape(r, name);
+    const got = expand(r.spec, keyOf(r.key.root, r.key.scaleIdx)); let ro = 0; for (let b = 0; b < 16; b++) if (got[b].root === a.truth[b].root) ro++;
+    check((want ? Math.abs(r.tuningCents - want) <= 8 : r.tuningCents === 0) && ro === 16, `tuning, noisy mix ${name}: read ${r.tuningCents} cents off, roots ${ro}/16`);
+  }
+}
+if (fixGroup('file')) {
+  // A file of 16 bars holding an 8-bar progression twice: read whole (32 beats) from its first downbeat, as on a host grid.
+  const eight = P([0, 4], [4, 4], [5, 4], [3, 4], [1, 4], [4, 4], [0, 4], [4, 4, { ext: 7 }]);
+  const a = synth({ root: 7, scaleIdx: 1, spec: eight, bpm: 112, bars: 16, offset: 0.37, bassPerBeat: true, seed: 31 });
+  const r = Listen.analyse(a.samples, a.sr, { gen: Gen }); checkShape(r, 'file, 8 bars twice', 32);
+  const got = expand(r.spec, keyOf(r.key.root, r.key.scaleIdx)); let ro = 0; for (let b = 0; b < 32; b++) if (got[b] && got[b].root === a.truth[b].root) ro++;
+  check(got.length === 32 && ro === 32 && Math.abs(r.beatOffsetSec - 0.37) <= 0.035 && r.key.root === 7 && r.key.scaleIdx === 1,
+    `file, 8-bar progression twice: ${got.length} beats read, roots ${ro}/32, first downbeat ${r.beatOffsetSec} s (0.37), key ${NOTE[r.key.root]} ${SCALE_NAME[r.key.scaleIdx]}`);
+  // A minor ii-V-i of 8 bars that ends on its tonic, twice: the key is that tonic's (an 8-bar phrase comes home before it
+  // loops; its last chord says nothing about the key a fifth below).
+  for (const [root, bpm, seed] of [[9, 104, 41], [2, 132, 42], [5, 90, 43]]) {
+    const iiVi = P([3, 4], [6, 4], [2, 4], [5, 4], [1, 4, { ext: 7 }], [4, 4, { q: 'dom7' }], [0, 8]);
+    const b2 = synth({ root, scaleIdx: 0, spec: iiVi, bpm, bars: 16, offset: 0.2, seed }), r2 = Listen.analyse(b2.samples, b2.sr, { gen: Gen });
+    checkShape(r2, 'file, minor ii-V-i', 32);
+    check(r2.key.root === root && SCALES[r2.key.scaleIdx][2] === 3, `file, minor ii-V-i of 8 bars in ${NOTE[root]} minor: key ${NOTE[r2.key.root]} ${SCALE_NAME[r2.key.scaleIdx]}`);
+  }
+  // The file's own wording: nothing asks to play the track and listen again.
+  const c = synth({ root: 2, scaleIdx: 0, spec: P([0, 4], [5, 4], [2, 4], [6, 4], [3, 4], [0, 4], [4, 4, { q: 'maj' }], [0, 4]), bpm: 120, bars: 12, seed: 44 });
+  const rc = Listen.analyse(c.samples, c.sr, { gen: Gen });
+  check(!rc.notes.some(n => /listen again|on the grid/.test(n)), `file: no grid wording in a file read (${rc.notes.join(' | ')})`);
+}
+// The highest confidence a reading may show: little pitch in the sound (tonality) caps it (0.002: both are rounded).
+const capOf = r => Math.min(1, Math.max(0, (r.tonality - 0.3) / 0.15));
+if (fixGroup('confidence')) {
+  // a noisy mix (tonality under 0.45): read right, but not shown as sure
+  const a = synth({ root: 10, scaleIdx: 0, spec: MINOR[0], bpm: 96, tune: 42, seed: 6, snare: true, hat: 0.4, noise: 0.2 }), r = Listen.analyse(a.samples, a.sr, { gen: Gen });
+  check(r.tonality < 0.45 && r.keyConfidence <= capOf(r) + 0.002 && r.chordConfidence <= capOf(r) + 0.002 && r.confidence.every(x => x <= capOf(r) + 0.002),
+    `confidence: a noisy mix (tonality ${r.tonality}) shows at most ${capOf(r).toFixed(2)} (key ${r.keyConfidence}, chords ${r.chordConfidence})`);
+  // two and three seconds of a song (one or two chords, looped to fill 4 bars): not sure of the whole progression
+  for (const sec of [2, 3]) {
+    const s = synth({ root: 4, scaleIdx: 1, spec: MAJOR[1], bpm: 120, bars: 4, seed: 51 }), x = s.samples.slice(0, Math.round(sec * s.sr));
+    for (const [mode, o] of [['file', {}], ['grid', { grid: { bpm: 120, firstBeatSec: 0, startBeat: 0, beatsPerBar: 4 } }]]) {
+      const rs = Listen.analyse(x, s.sr, { gen: Gen, ...o });
+      check(!rs.failed && rs.keyConfidence <= 0.65 && rs.chordConfidence <= 0.65, `confidence: ${sec} s of a song (${mode}): key ${rs.keyConfidence}, chords ${rs.chordConfidence} (at most 0.65)`);
+    }
+  }
+  // What the note transcription says of the whole sound: on every beat two notes a semitone apart (how it hears a drum kit)
+  // is drums only; one note on every beat with nothing on its third (a lone tuned kick) is one note, not chords.
+  const song = synth({ root: 0, scaleIdx: 1, spec: MAJOR[0], bpm: 120, bars: 8, seed: 52 }), secs = song.samples.length / song.sr;
+  const fake = keysOn => { const T = Math.floor(secs * 86), note = new Float32Array(T * 88).fill(0.1), times = new Float64Array(T);
+    for (let k = 0; k < T; k++) { times[k] = k / 86; for (const [midi, v] of keysOn) note[k * 88 + midi - 21] = v; } return { note, times }; };
+  const plainSong = Listen.analyse(song.samples, song.sr, { gen: Gen });
+  const kit = Listen.analyse(song.samples, song.sr, { gen: Gen, notes: fake([[56, 0.8], [57, 0.75], [43, 0.4]]) });
+  const lone = Listen.analyse(song.samples, song.sr, { gen: Gen, notes: fake([[37, 0.9], [44, 0.3]]) });
+  const chords = Listen.analyse(song.samples, song.sr, { gen: Gen, notes: fake([[48, 0.8], [52, 0.7], [55, 0.7], [60, 0.6]]) });
+  check(plainSong.pitched && !plainSong.oneNote && kit.pitched === false, `confidence: notes heard as a drum kit (semitone clusters) mean drums only (${kit.pitched}; the spectrum alone ${plainSong.pitched})`);
+  check(lone.pitched && lone.oneNote === true && lone.keyConfidence <= 0.3 && lone.notes.some(n => /only one note sounds \(C#\)/.test(n)), `confidence: one note on every beat is one note (${lone.oneNote}, key ${lone.keyConfidence}: ${lone.notes.join(' | ')})`);
+  check(chords.pitched && !chords.oneNote, 'confidence: notes of a chord on every beat are chords');
+  // A tuned kick hit on every other beat, distorted (its overtones spell a major chord) with a snare between: one note.
+  for (const [hz, bpm, decay] of [[49, 140, 0.8], [43.7, 150, 1.0]]) {
+    const sr = 22050, beat = 60 / bpm, n = Math.ceil(48 * beat * sr), x = new Float32Array(n), rnd = lcg(bpm);
+    for (let b = 0; b < 48; b++) {
+      const i0 = Math.round(b * beat * sr);
+      if (b % 2 === 0) for (let i = 0; i < decay * 2 * sr && i0 + i < n; i++) { const t = i / sr, f = hz * (1 + 1.5 * Math.exp(-t * 40)); x[i0 + i] += 0.8 * Math.tanh(2.5 * Math.sin(2 * Math.PI * f * t) * Math.exp(-t / decay)); }
+      else for (let i = 0; i < 0.18 * sr && i0 + i < n; i++) { const t = i / sr; x[i0 + i] += 0.35 * (0.8 * rnd() + 0.3 * Math.sin(2 * Math.PI * 190 * t)) * Math.exp(-t * 22); }
+    }
+    for (const o of [{}, { grid: { bpm, firstBeatSec: 0, startBeat: 0, beatsPerBar: 4 } }]) {
+      const r = Listen.analyse(x, sr, { gen: Gen, ...o });
+      check(r.oneNote === true && r.keyConfidence <= 0.3 && r.chordConfidence <= 0.35, `confidence: a distorted ${hz} Hz kick on every other beat (${o.grid ? 'grid' : 'file'}) is one note (${r.oneNote}, key ${r.keyConfidence}, chords ${r.chordConfidence})`);
+    }
+  }
+  // a whole clean song is not capped
+  const w = synth({ root: 4, scaleIdx: 1, spec: MAJOR[1], bpm: 120, bars: 8, seed: 51 }), rw = Listen.analyse(w.samples, w.sr, { gen: Gen });
+  check(rw.tonality >= 0.45 && rw.chordConfidence > 0.65, `confidence: 8 bars of a clean song stay as sure as they were (tonality ${rw.tonality}, chords ${rw.chordConfidence})`);
+}
+if (fixGroup('robust')) {
+  // One bad sample (NaN or infinite, a glitch) must not void the read: it is read as silence and said so.
+  const s = synth({ root: 9, scaleIdx: 0, spec: MINOR[0], bpm: 120, bars: 8, seed: 61 }), clean = Listen.analyse(s.samples, s.sr, { gen: Gen });
+  const without = r => JSON.stringify(Object.assign({}, r, { notes: r.notes.filter(n => !/(NaN or infinite)/.test(n)) }));
+  for (const [name, f] of [['one NaN', x => { x[5 * 44100] = NaN; }], ['one +Infinity', x => { x[7 * 44100] = Infinity; }], ['one -Infinity', x => { x[3 * 44100] = -Infinity; }],
+    ['100 ms of NaN', x => { x.fill(NaN, 9 * 44100, 9.1 * 44100); }]]) {
+    const x = Float32Array.from(s.samples); f(x); const keep = Float32Array.from(x);
+    const r = Listen.analyse(x, s.sr, { gen: Gen });
+    // (one sample changes nothing else; 100 ms of silence may change the confidences a little, not the chords)
+    const same = name.startsWith('100') ? JSON.stringify([r.spec, r.key, r.bpm]) === JSON.stringify([clean.spec, clean.key, clean.bpm]) : without(r) === JSON.stringify(clean);
+    check(!r.failed && same && r.notes.some(n => /(NaN or infinite)/.test(n)), `robust: ${name} reads as the clean audio and says so (${r.failReason || ''} ${r.notes.join(' | ')})`);
+    check(x.every((v, i) => v === keep[i] || (v !== v && keep[i] !== keep[i])), `robust: ${name}: the input is left as it was`);
+  }
+  // a NaN in the side channel (on a host grid) changes nothing either
+  const g = { grid: { bpm: 120, firstBeatSec: 0, startBeat: 0, beatsPerBar: 4 } }, side = new Float32Array(s.samples.length); side[44100] = NaN;
+  const rg = Listen.analyse(s.samples, s.sr, { gen: Gen, ...g }), rgs = Listen.analyse(s.samples, s.sr, { gen: Gen, ...g, side });
+  check(JSON.stringify(rg.spec) === JSON.stringify(rgs.spec) && !rgs.failed, 'robust: a NaN in the side channel changes nothing');
+  // No reading at all: marked failed with its reason, no chords, every confidence 0.
+  for (const [name, x, sr, why] of [['all NaN', new Float32Array(44100 * 4).fill(NaN), 44100, 'invalid'], ['silence', new Float32Array(44100 * 4), 44100, 'silent'],
+    ['empty', new Float32Array(0), 44100, 'no-audio'], ['no sample rate', new Float32Array(1000).fill(0.1), 0, 'no-audio'], ['0.3 s', s.samples.slice(0, 13230), 44100, 'too-short']]) {
+    const r = Listen.analyse(x, sr, { gen: Gen });
+    check(r.failed === true && r.failReason === why && Array.isArray(r.spec) && r.spec.length === 0 && r.confidence.length === 0 && r.pitched === false &&
+      r.keyConfidence === 0 && r.chordConfidence === 0 && r.bpmConfidence === 0 && typeof r.notes[0] === 'string', `robust: ${name} is a failed read (${r.failReason}: ${r.notes[0]}), with no chords`);
+  }
+  check(clean.failed === undefined || clean.failed === false, 'robust: a good read is not marked failed');
 }
 
 // ---------- note evidence from a transcriber (opts.notes) ----------
